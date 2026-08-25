@@ -1,6 +1,5 @@
-# Docker Compose — bot IA + Telegram uniquement
-# MT5 doit tourner sur la machine hote (Windows) ou via Wine.
-# Pour du simulation uniquement : decommenter MT5_MODE=mock
+# Docker Compose — bot IA + Telegram en lecture seule.
+# Aucun acces MT5 n'est possible depuis ce conteneur Linux.
 version: "3.8"
 
 services:
@@ -10,6 +9,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      TRADING_MODE: "off"
     volumes:
       - ./state.json:/app/state.json
       - ./logs:/app/logs

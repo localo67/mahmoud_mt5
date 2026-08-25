@@ -6,9 +6,13 @@ pour ne pas bloquer l'event loop asyncio.
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Any
 
-import MetaTrader5 as mt5
+try:
+    import MetaTrader5 as mt5
+except ModuleNotFoundError:
+    mt5 = None
 
 from config import (
     MT5_LOGIN,
@@ -18,6 +22,8 @@ from config import (
     DEVIATION_PIPS,
     MAGIC_NUMBER,
     TIMEFRAME_MAP,
+    TRADING_MODE,
+    VALID_TRADING_MODES,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,9 +43,74 @@ class MT5Client:
     Toutes les methodes publiques sont async et thread-safe.
     """
 
-    def __init__(self):
+    def __init__(self, mt5_api=None, trading_mode: str = TRADING_MODE):
+        normalized_mode = trading_mode.lower()
+        if normalized_mode not in VALID_TRADING_MODES:
+            raise ValueError(f"Mode de trading invalide: {trading_mode!r}")
+
+        self._mt5 = mt5_api if mt5_api is not None else mt5
+        self.trading_mode = normalized_mode
+        self._trading_armed: bool = False
         self._initialized: bool = False
-        self._loop: asyncio.AbstractEventLoop = asyncio.get_event_loop()
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="mt5-client",
+        )
+
+    def arm_trading(self) -> None:
+        """Arme les mutations en memoire pour cette instance uniquement."""
+        self._trading_armed = True
+
+    def disarm_trading(self) -> None:
+        """Desarme immediatement toutes les mutations."""
+        self._trading_armed = False
+
+    @property
+    def is_trading_armed(self) -> bool:
+        return self._trading_armed
+
+    def _require_api(self):
+        if self._mt5 is None:
+            raise MT5Error(
+                "MetaTrader5 indisponible: utilisez Windows natif ou injectez une API de test"
+            )
+        return self._mt5
+
+    async def _mutation_refusal(self) -> Optional[dict]:
+        """Retourne un refus, ou None si la mutation est explicitement autorisee."""
+        if self.trading_mode == "live":
+            return {
+                "success": False,
+                "error": "Mutation MT5 refusee: mode live reconnu mais non implemente.",
+            }
+        if self.trading_mode != "demo":
+            return {
+                "success": False,
+                "error": f"Mutation MT5 refusee: mode {self.trading_mode} en lecture seule.",
+            }
+        if not self._trading_armed:
+            return {
+                "success": False,
+                "error": "Mutation MT5 refusee: armement explicite requis.",
+            }
+
+        try:
+            api = self._require_api()
+        except MT5Error as exc:
+            return {"success": False, "error": f"Mutation MT5 refusee: {exc}"}
+
+        account = await self._run_blocking(api.account_info)
+        if account is None:
+            return {
+                "success": False,
+                "error": "Mutation MT5 refusee: compte MT5 non confirme.",
+            }
+        if getattr(account, "trade_mode", None) != api.ACCOUNT_TRADE_MODE_DEMO:
+            return {
+                "success": False,
+                "error": "Mutation MT5 refusee: le compte confirme n'est pas un compte demo.",
+            }
+        return None
 
     # ------------------------------------------------------------------
     # Cycle de vie de la connexion
@@ -50,13 +121,20 @@ class MT5Client:
         Initialise la connexion au terminal MT5 avec retry.
         Retourne True si connecte, False apres epuisement des tentatives.
         """
+        if self._mt5 is None:
+            logger.warning(
+                "MetaTrader5 indisponible sur ce runtime; connexion MT5 desactivee"
+            )
+            return False
+
+        api = self._mt5
         for attempt in range(1, MAX_RETRIES + 1):
             logger.info(f"MT5 : tentative de connexion {attempt}/{MAX_RETRIES}...")
 
             # Etape 1 : initialiser le package MT5
-            init_ok = await self._run_blocking(mt5.initialize)
+            init_ok = await self._run_blocking(api.initialize)
             if not init_ok:
-                error = await self._run_blocking(mt5.last_error)
+                error = await self._run_blocking(api.last_error)
                 logger.warning(
                     f"MT5 init echec (tentative {attempt}): {error}"
                 )
@@ -65,14 +143,14 @@ class MT5Client:
 
             # Etape 2 : se connecter au compte
             login_ok = await self._run_blocking(
-                mt5.login, MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER
+                api.login, MT5_LOGIN, password=MT5_PASSWORD, server=MT5_SERVER
             )
             if not login_ok:
-                error = await self._run_blocking(mt5.last_error)
+                error = await self._run_blocking(api.last_error)
                 logger.warning(
                     f"MT5 login echec (tentative {attempt}): {error}"
                 )
-                await self._run_blocking(mt5.shutdown)
+                await self._run_blocking(api.shutdown)
                 await asyncio.sleep(2)
                 continue
 
@@ -96,7 +174,8 @@ class MT5Client:
         if not self._initialized:
             return await self.initialize()
 
-        terminal_info = await self._run_blocking(mt5.terminal_info)
+        api = self._require_api()
+        terminal_info = await self._run_blocking(api.terminal_info)
         if terminal_info is None:
             logger.warning("MT5 : terminal deconnecte, reconnexion...")
             self._initialized = False
@@ -108,7 +187,8 @@ class MT5Client:
         """Arret propre de la connexion MT5."""
         if self._initialized:
             logger.info("MT5 : arret de la connexion...")
-            await self._run_blocking(mt5.shutdown)
+            api = self._require_api()
+            await self._run_blocking(api.shutdown)
             self._initialized = False
 
     @property
@@ -124,9 +204,10 @@ class MT5Client:
         Retourne les informations du compte :
         balance, equity, margin, free_margin, leverage, etc.
         """
-        info = await self._run_blocking(mt5.account_info)
+        api = self._require_api()
+        info = await self._run_blocking(api.account_info)
         if info is None:
-            error = await self._run_blocking(mt5.last_error)
+            error = await self._run_blocking(api.last_error)
             raise MT5Error(f"Impossible d'obtenir les infos du compte : {error}")
 
         return {
@@ -140,6 +221,7 @@ class MT5Client:
             "free_margin": info.margin_free,
             "leverage": info.leverage,
             "margin_level": info.margin_level if hasattr(info, "margin_level") else None,
+            "trade_mode": info.trade_mode if hasattr(info, "trade_mode") else None,
         }
 
     # ------------------------------------------------------------------
@@ -151,10 +233,11 @@ class MT5Client:
         Retourne la liste des positions ouvertes.
         Filtre par symbole si specifie.
         """
+        api = self._require_api()
         if symbol:
-            positions = await self._run_blocking(mt5.positions_get, symbol=symbol)
+            positions = await self._run_blocking(api.positions_get, symbol=symbol)
         else:
-            positions = await self._run_blocking(mt5.positions_get)
+            positions = await self._run_blocking(api.positions_get)
 
         if positions is None:
             return []
@@ -164,7 +247,7 @@ class MT5Client:
             result.append({
                 "ticket": p.ticket,
                 "symbol": p.symbol,
-                "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                "type": "BUY" if p.type == api.POSITION_TYPE_BUY else "SELL",
                 "volume": p.volume,
                 "price_open": p.price_open,
                 "price_current": p.price_current,
@@ -185,9 +268,10 @@ class MT5Client:
 
     async def get_current_price(self, symbol: str) -> dict:
         """Retourne le bid et ask actuels pour un symbole."""
-        tick = await self._run_blocking(mt5.symbol_info_tick, symbol)
+        api = self._require_api()
+        tick = await self._run_blocking(api.symbol_info_tick, symbol)
         if tick is None:
-            error = await self._run_blocking(mt5.last_error)
+            error = await self._run_blocking(api.last_error)
             raise MT5Error(f"Impossible d'obtenir le prix pour {symbol} : {error}")
 
         return {
@@ -199,7 +283,8 @@ class MT5Client:
 
     async def get_symbol_info(self, symbol: str) -> Optional[dict]:
         """Retourne les informations detaillees d'un symbole."""
-        info = await self._run_blocking(mt5.symbol_info, symbol)
+        api = self._require_api()
+        info = await self._run_blocking(api.symbol_info, symbol)
         if info is None:
             return None
 
@@ -228,9 +313,10 @@ class MT5Client:
         timeframe : "M1", "M5", "M15", "M30", "H1", "H4", "D1"
         Retourne une liste de rates MT5 (objets avec open, high, low, close, tick_volume, spread, real_volume).
         """
-        tf = getattr(mt5, f"TIMEFRAME_{timeframe}", mt5.TIMEFRAME_M5)
+        api = self._require_api()
+        tf = getattr(api, f"TIMEFRAME_{timeframe}", api.TIMEFRAME_M5)
         rates = await self._run_blocking(
-            mt5.copy_rates_from_pos, symbol, tf, 0, count
+            api.copy_rates_from_pos, symbol, tf, 0, count
         )
         return rates
 
@@ -262,13 +348,18 @@ class MT5Client:
             dict: {"success": bool, "ticket": int, "volume": float, "price": float,
                    "error": str (si echec), "retcode": int}
         """
+        refusal = await self._mutation_refusal()
+        if refusal is not None:
+            return refusal
+
+        api = self._require_api()
         tick = await self.get_current_price(symbol)
         price = tick["ask"] if order_type == "buy" else tick["bid"]
 
-        mt5_type = mt5.ORDER_TYPE_BUY if order_type == "buy" else mt5.ORDER_TYPE_SELL
+        mt5_type = api.ORDER_TYPE_BUY if order_type == "buy" else api.ORDER_TYPE_SELL
 
         request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": api.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": volume,
             "type": mt5_type,
@@ -276,8 +367,8 @@ class MT5Client:
             "deviation": DEVIATION_PIPS,
             "magic": MAGIC_NUMBER,
             "comment": comment,
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_time": api.ORDER_TIME_GTC,
+            "type_filling": api.ORDER_FILLING_IOC,
         }
 
         if sl is not None:
@@ -285,8 +376,8 @@ class MT5Client:
         if tp is not None:
             request["tp"] = tp
 
-        result = await self._run_blocking(mt5.order_send, request)
-        return self._parse_result(result, request)
+        result = await self._run_blocking(api.order_send, request)
+        return await self._parse_result(result, request)
 
     async def close_position(
         self,
@@ -298,8 +389,13 @@ class MT5Client:
         Returns:
             dict: {"success": bool, "ticket": int, "error": str (si echec)}
         """
+        refusal = await self._mutation_refusal()
+        if refusal is not None:
+            return refusal
+
+        api = self._require_api()
         # Recuperer les infos de la position
-        position = await self._run_blocking(mt5.positions_get, ticket=ticket)
+        position = await self._run_blocking(api.positions_get, ticket=ticket)
         if position is None or len(position) == 0:
             return {"success": False, "error": f"Position ticket {ticket} introuvable"}
 
@@ -310,15 +406,15 @@ class MT5Client:
 
         # Determiner le type oppose et le prix de fermeture
         tick = await self.get_current_price(symbol)
-        if pos_type == mt5.POSITION_TYPE_BUY:
-            close_type = mt5.ORDER_TYPE_SELL
+        if pos_type == api.POSITION_TYPE_BUY:
+            close_type = api.ORDER_TYPE_SELL
             price = tick["bid"]
         else:
-            close_type = mt5.ORDER_TYPE_BUY
+            close_type = api.ORDER_TYPE_BUY
             price = tick["ask"]
 
         request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": api.TRADE_ACTION_DEAL,
             "symbol": symbol,
             "volume": volume,
             "type": close_type,
@@ -327,12 +423,12 @@ class MT5Client:
             "deviation": DEVIATION_PIPS,
             "magic": MAGIC_NUMBER,
             "comment": "Close by MT5 AI Bot",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_time": api.ORDER_TIME_GTC,
+            "type_filling": api.ORDER_FILLING_IOC,
         }
 
-        result = await self._run_blocking(mt5.order_send, request)
-        parsed = self._parse_result(result, request)
+        result = await self._run_blocking(api.order_send, request)
+        parsed = await self._parse_result(result, request)
         if parsed["success"]:
             parsed["closed_symbol"] = symbol
             parsed["closed_volume"] = volume
@@ -345,6 +441,10 @@ class MT5Client:
         Returns:
             dict: {"success": bool, "closed": int, "errors": list[str]}
         """
+        refusal = await self._mutation_refusal()
+        if refusal is not None:
+            return refusal
+
         positions = await self.get_positions(symbol=symbol)
         if not positions:
             return {"success": True, "closed": 0, "errors": []}
@@ -385,8 +485,13 @@ class MT5Client:
         Returns:
             dict: {"success": bool, "ticket": int, "error": str (si echec)}
         """
+        refusal = await self._mutation_refusal()
+        if refusal is not None:
+            return refusal
+
+        api = self._require_api()
         request = {
-            "action": mt5.TRADE_ACTION_SLTP,
+            "action": api.TRADE_ACTION_SLTP,
             "position": ticket,
         }
 
@@ -395,8 +500,8 @@ class MT5Client:
         if tp is not None:
             request["tp"] = tp
 
-        result = await self._run_blocking(mt5.order_send, request)
-        return self._parse_result(result, request)
+        result = await self._run_blocking(api.order_send, request)
+        return await self._parse_result(result, request)
 
     # ------------------------------------------------------------------
     # Utilitaires internes
@@ -404,21 +509,22 @@ class MT5Client:
 
     async def _run_blocking(self, func, *args, **kwargs):
         """
-        Execute une fonction Python bloquante dans un thread separe
-        pour ne pas bloquer l'event loop asyncio.
+        Execute et serialise les appels MT5 dans un thread dedie.
         """
-        return await self._loop.run_in_executor(
-            None,
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            self._executor,
             lambda: func(*args, **kwargs),
         )
 
-    def _parse_result(self, result, request: dict) -> dict:
+    async def _parse_result(self, result, request: dict) -> dict:
         """
         Normalise le resultat de mt5.order_send() en dictionnaire.
         Gere les differents codes de retour MT5.
         """
+        api = self._require_api()
         if result is None:
-            error = mt5.last_error()
+            error = await self._run_blocking(api.last_error)
             return {
                 "success": False,
                 "retcode": error[0] if error else -1,
@@ -427,7 +533,7 @@ class MT5Client:
 
         retcode = result.retcode
 
-        if retcode == mt5.TRADE_RETCODE_DONE:
+        if retcode == api.TRADE_RETCODE_DONE:
             return {
                 "success": True,
                 "ticket": result.order,
@@ -439,16 +545,16 @@ class MT5Client:
 
         # Mapping des codes d'erreur courants
         error_messages = {
-            mt5.TRADE_RETCODE_NO_CONNECTION: "Pas de connexion au serveur de trading",
-            mt5.TRADE_RETCODE_REQUOTE: "Requote - le prix a change, reessayez",
-            mt5.TRADE_RETCODE_TOO_MANY_REQUESTS: "Trop de requetes, attendez un instant",
-            mt5.TRADE_RETCODE_INVALID_VOLUME: "Volume invalide",
-            mt5.TRADE_RETCODE_INVALID_PRICE: "Prix invalide",
-            mt5.TRADE_RETCODE_INVALID_STOPS: "SL/TP invalides",
-            mt5.TRADE_RETCODE_LIMIT_ORDERS: "Limite d'ordres atteinte",
-            mt5.TRADE_RETCODE_MARKET_CLOSED: "Marche ferme",
-            mt5.TRADE_RETCODE_NOT_ENOUGH_MONEY: "Marge insuffisante",
-            mt5.TRADE_RETCODE_TRADE_DISABLED: "Trading desactive sur ce compte",
+            api.TRADE_RETCODE_NO_CONNECTION: "Pas de connexion au serveur de trading",
+            api.TRADE_RETCODE_REQUOTE: "Requote - le prix a change, reessayez",
+            api.TRADE_RETCODE_TOO_MANY_REQUESTS: "Trop de requetes, attendez un instant",
+            api.TRADE_RETCODE_INVALID_VOLUME: "Volume invalide",
+            api.TRADE_RETCODE_INVALID_PRICE: "Prix invalide",
+            api.TRADE_RETCODE_INVALID_STOPS: "SL/TP invalides",
+            api.TRADE_RETCODE_LIMIT_ORDERS: "Limite d'ordres atteinte",
+            api.TRADE_RETCODE_MARKET_CLOSED: "Marche ferme",
+            api.TRADE_RETCODE_NOT_ENOUGH_MONEY: "Marge insuffisante",
+            api.TRADE_RETCODE_TRADE_DISABLED: "Trading desactive sur ce compte",
         }
 
         error_msg = error_messages.get(

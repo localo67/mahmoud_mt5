@@ -1,5 +1,5 @@
 [Unit]
-Description=MT5 AI XAUUSD Trading Bot
+Description=MT5 AI XAUUSD Read-Only Bot (No MT5 on Linux)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=trader
 WorkingDirectory=/opt/mt5-ai-bot
-ExecStart=/opt/mt5-ai-bot/venv/bin/python bot.py
+ExecStart=/usr/bin/env TRADING_MODE=off /opt/mt5-ai-bot/venv/bin/python bot.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

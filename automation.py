@@ -25,7 +25,7 @@ class AutomationEngine:
     def __init__(self, application: Application, mt5_client):
         self.app = application
         self.mt5 = mt5_client
-        self.enabled: bool = True
+        self.enabled: bool = False
 
         # Composants
         self.risk_mgr = RiskManager()
@@ -52,6 +52,7 @@ class AutomationEngine:
             ai_trader=self.ai_trader,
             strategies=strategies,
         )
+        self.engine.enabled = False
 
         self.engine.chat_id = AUTHORIZED_CHAT_ID
 

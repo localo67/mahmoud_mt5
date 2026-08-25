@@ -1,6 +1,7 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+ENV TRADING_MODE=off
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Application
 COPY . .
 
-# Run
+# Lecture seule : MetaTrader5 n'est pas installe dans cette image Linux.
 CMD ["python", "bot.py"]

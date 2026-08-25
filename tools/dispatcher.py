@@ -12,6 +12,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+MUTATING_FUNCTIONS = frozenset({
+    "open_position",
+    "close_position",
+    "close_all_positions",
+    "modify_position",
+})
+
 
 class Dispatcher:
     """
@@ -34,6 +41,12 @@ class Dispatcher:
         """
         func_name = action.get("function", "")
         args = action.get("arguments", {})
+
+        if func_name in MUTATING_FUNCTIONS:
+            return (
+                "Action refusee : le Dispatcher IA est strictement en lecture seule. "
+                "Aucune mutation MT5 n'a ete appelee."
+            )
 
         handler = self._get_handler(func_name)
         if handler is None:
@@ -63,10 +76,6 @@ class Dispatcher:
 
     def _get_handler(self, name: str):
         handlers = {
-            "open_position": self._handle_open,
-            "close_position": self._handle_close,
-            "close_all_positions": self._handle_close_all,
-            "modify_position": self._handle_modify,
             "get_account_info": self._handle_account_info,
             "get_positions": self._handle_positions,
             "get_technical_analysis": self._handle_analysis,
@@ -76,99 +85,6 @@ class Dispatcher:
     # ------------------------------------------------------------------
     # Handlers individuels
     # ------------------------------------------------------------------
-
-    async def _handle_open(self, args: dict) -> str:
-        symbol = args.get("symbol", "EURUSD").upper()
-        order_type = args.get("order_type", "buy")
-        volume = args.get("volume", 0.01)
-        sl = args.get("sl")
-        tp = args.get("tp")
-        comment = args.get("comment", "MT5 AI Bot")
-
-        result = await self.mt5.open_order(
-            symbol=symbol,
-            order_type=order_type,
-            volume=volume,
-            sl=sl,
-            tp=tp,
-            comment=comment,
-        )
-
-        if result.get("success"):
-            direction = "ACHAT" if order_type == "buy" else "VENTE"
-            lines = [
-                f" Position ouverte avec succes !",
-                f"",
-                f" Ticket : `{result['ticket']}`",
-                f" Symbole : {symbol}",
-                f" Direction : {direction}",
-                f" Volume : {volume} lot(s)",
-                f" Prix : {result['price']:.5f}",
-            ]
-            if sl:
-                lines.append(f" Stop Loss : {sl:.5f}")
-            if tp:
-                lines.append(f" Take Profit : {tp:.5f}")
-
-            return "\n".join(lines)
-        else:
-            return f" Echec de l'ouverture de position :\n{result.get('error', 'Erreur inconnue')}"
-
-    async def _handle_close(self, args: dict) -> str:
-        ticket = args.get("ticket")
-        if not ticket:
-            return " Il me faut le numero de ticket pour fermer la position. Utilisez /positions pour le trouver."
-
-        result = await self.mt5.close_position(ticket=ticket)
-
-        if result.get("success"):
-            sym = result.get("closed_symbol", "")
-            vol = result.get("closed_volume", 0)
-            return f" Position #{ticket} fermee avec succes ! ({sym}, {vol} lot(s))"
-        else:
-            return f" Echec de la fermeture :\n{result.get('error', 'Erreur inconnue')}"
-
-    async def _handle_close_all(self, args: dict) -> str:
-        symbol = args.get("symbol")
-        if symbol:
-            symbol = symbol.upper()
-
-        result = await self.mt5.close_all_positions(symbol=symbol)
-
-        if result["closed"] == 0:
-            cible = f"sur {symbol}" if symbol else "ouvertes"
-            return f" Aucune position {cible} a fermer."
-
-        lines = [f" Fermeture terminee : {result['closed']} position(s) fermee(s)."]
-        if result.get("errors"):
-            lines.append(f" {len(result['errors'])} erreur(s) :")
-            for err in result["errors"]:
-                lines.append(f"   - {err}")
-
-        return "\n".join(lines)
-
-    async def _handle_modify(self, args: dict) -> str:
-        ticket = args.get("ticket")
-        sl = args.get("sl")
-        tp = args.get("tp")
-
-        if not ticket:
-            return " Il me faut le numero de ticket pour modifier la position."
-
-        if sl is None and tp is None:
-            return " Il faut au moins un Stop Loss ou un Take Profit a modifier."
-
-        result = await self.mt5.modify_position(ticket=ticket, sl=sl, tp=tp)
-
-        if result.get("success"):
-            changes = []
-            if sl is not None:
-                changes.append(f"SL -> {sl:.5f}")
-            if tp is not None:
-                changes.append(f"TP -> {tp:.5f}")
-            return f" Position #{ticket} modifiee : {', '.join(changes)}"
-        else:
-            return f" Echec de la modification :\n{result.get('error', 'Erreur inconnue')}"
 
     async def _handle_account_info(self, args: dict) -> str:
         info = await self.mt5.get_account_info()

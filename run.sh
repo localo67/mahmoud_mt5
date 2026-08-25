@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lancement du bot MT5 AI — Linux/Mac
+# Lancement Linux en lecture seule : aucun package ni terminal MT5.
 set -e
 
 cd "$(dirname "$0")"
@@ -16,5 +16,7 @@ fi
 source venv/bin/activate
 pip install -q -r requirements.txt
 
-echo "Demarrage du bot..."
+export TRADING_MODE=off
+echo "Demarrage Linux en TRADING_MODE=off (aucun acces trading MT5)."
+echo "Le trading MT5 est supporte uniquement sous Windows natif."
 python bot.py

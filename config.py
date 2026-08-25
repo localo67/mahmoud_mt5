@@ -20,6 +20,13 @@ AUTHORIZED_CHAT_ID: int = int(os.getenv("AUTHORIZED_CHAT_ID", "0"))
 MT5_LOGIN: int = int(os.getenv("MT5_LOGIN", "0"))
 MT5_PASSWORD: str = os.getenv("MT5_PASSWORD", "")
 MT5_SERVER: str = os.getenv("MT5_SERVER", "")
+TRADING_MODE: str = os.getenv("TRADING_MODE", "off").lower()
+VALID_TRADING_MODES = frozenset({"off", "shadow", "demo", "live"})
+if TRADING_MODE not in VALID_TRADING_MODES:
+    raise ValueError(
+        f"TRADING_MODE invalide: {TRADING_MODE!r}; "
+        f"valeurs autorisees: {', '.join(sorted(VALID_TRADING_MODES))}"
+    )
 
 
 def validate_config() -> bool:

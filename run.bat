@@ -14,7 +14,6 @@ if not exist "venv\" (
 
 call venv\Scripts\activate
 pip install -q -r requirements.txt
-pip install -q MetaTrader5
 
 echo Demarrage du bot...
 python bot.py

@@ -1,10 +1,12 @@
 # MT5 AI Trading Bot
 
-Bot de trading complet combinant **Telegram**, **NVIDIA Nemotron 3 Super** (gratuit via OpenRouter), et **MetaTrader 5**.
+Bot de recherche et d'assistance combinant **Telegram**, **OpenRouter** et
+**MetaTrader 5**, avec mutations bloquees par defaut.
 
 - Interface Telegram en francais avec emojis
-- Comprend les ordres en langage naturel (francais)
-- Strategie automatisee : MA Crossover et RSI
+- Consultation et analyse en langage naturel
+- Dispatcher IA strictement en lecture seule
+- Automation desactivee au demarrage
 - Securise : seul un chat_id autorise peut utiliser le bot
 
 ---
@@ -33,8 +35,10 @@ mt5-ai-bot/
 
 ## Fonctionnalites
 
-### 1. Trading manuel en langage naturel
-Envoyez un message en francais et l'IA l'interprete :
+### 1. Assistant IA en lecture seule
+Envoyez un message en francais pour consulter le compte, les positions ou une
+analyse. Les demandes suivantes sont reconnues mais explicitement refusees par
+le Dispatcher, sans appel a une mutation MT5 :
 - _"Achete 0.1 lot EURUSD avec SL a 1.0500"_
 - _"Vends 0.5 XAUUSD"_
 - _"Ferme le ticket 12345678"_
@@ -53,13 +57,17 @@ Envoyez un message en francais et l'IA l'interprete :
 - `/auto on` - Active les strategies MA Crossover et RSI
 - `/auto off` - Met en pause
 - Alertes Telegram automatiques a chaque signal
-- Execution automatique des trades
+- Desactivee a chaque demarrage
+- Ne contourne jamais la garde centrale du client MT5
 
 ### 5. Boutons inline
 Menu principal avec actions rapides : Solde, Positions, Analyse, Automation
 
 ### 6. Securite
-Seul le `AUTHORIZED_CHAT_ID` peut interagir avec le bot
+Seul le `AUTHORIZED_CHAT_ID` peut interagir avec le bot. Une mutation exige
+simultanement `TRADING_MODE=demo`, un compte MT5 confirme demo et un armement
+explicite en memoire via `MT5Client.arm_trading()`. Le mode `live` est reconnu
+mais non implemente.
 
 ---
 
@@ -69,7 +77,7 @@ Seul le `AUTHORIZED_CHAT_ID` peut interagir avec le bot
 
 - Python 3.10 ou plus recent
 - Un compte [OpenRouter](https://openrouter.ai/) (cle API gratuite)
-- MetaTrader 5 installe et connecte a un compte (demo ou reel)
+- Windows natif avec MetaTrader 5 pour toute connexion MT5
 - Un bot Telegram (creer via [@BotFather](https://t.me/BotFather))
 
 ### 1. Cloner et installer les dependances
@@ -97,6 +105,7 @@ Variables requises :
 | `OPENROUTER_API_KEY` | Cle API OpenRouter (gratuite sur openrouter.ai/keys) |
 | `OPENROUTER_MODEL` | Modele IA (defaut : `nvidia/nemotron-3-super-120b-a12b:free`) |
 | `AUTHORIZED_CHAT_ID` | Votre ID Telegram personnel |
+| `TRADING_MODE` | `off` (defaut), `shadow`, `demo` ou `live` (refuse/non implemente) |
 | `MT5_LOGIN` | Numero de compte MT5 |
 | `MT5_PASSWORD` | Mot de passe MT5 |
 | `MT5_SERVER` | Nom du serveur du broker |
@@ -129,35 +138,15 @@ python bot.py
 
 ---
 
-## MetaTrader 5 sur Linux
+## Politique de runtime
 
-Le package Python `MetaTrader5` est un binaire Windows. Sur Linux, deux options :
+- **Windows natif** : seul runtime supporte pour le terminal et le package MT5.
+- **Linux Debian** : tests, recherche et backtests sans acces trading.
+- **Docker Linux** : IA/Telegram en lecture seule, sans MT5.
 
-### Option A : Wine (recommandee)
-
-```bash
-# Installer Wine
-sudo dpkg --add-architecture i386
-sudo apt update
-sudo apt install wine64 wine32
-
-# Installer MT5 sous Wine
-wine mt5setup.exe
-
-# Installer Windows Python sous Wine
-wine python-3.10.11-amd64.exe
-
-# Installer le package MetaTrader5
-wine python -m pip install MetaTrader5
-
-# Lancer MT5 sous Wine AVANT de demarrer le bot
-wine "C:\Program Files\MetaTrader 5\terminal64.exe"
-```
-
-### Option B : Mode mock (developpement)
-
-Pour tester le bot sans MT5, vous pouvez creer un mock de `MT5Client`.
-Le bot continuera a fonctionner pour les interactions Telegram et IA.
+`run.sh` et Docker utilisent `TRADING_MODE=off`. Wine n'est pas un runtime MT5
+supporte par ce projet. Voir [docs/runtime.md](docs/runtime.md) pour les
+conditions de garde et le smoke test Windows obligatoire.
 
 ---
 
@@ -187,12 +176,8 @@ Bot : Solde du compte ...
       ...
 
 Utilisateur : Achete 0.1 lot EURUSD avec SL a 1.0520 et TP a 1.0580
-Bot : Position ouverte avec succes !
-      Ticket : 12345678
-      Symbole : EURUSD
-      Direction : ACHAT
-      Volume : 0.1 lot(s)
-      ...
+Bot : Action refusee : le Dispatcher IA est strictement en lecture seule.
+      Aucune mutation MT5 n'a ete appelee.
 
 Utilisateur : Analyse XAUUSD
 Bot : Analyse technique - XAUUSD
