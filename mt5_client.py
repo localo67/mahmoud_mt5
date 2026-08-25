@@ -4,9 +4,12 @@ Tous les appels bloquants MT5 sont executes via run_in_executor()
 pour ne pas bloquer l'event loop asyncio.
 """
 
+import atexit
 import asyncio
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Optional, Any
 
 try:
@@ -27,6 +30,32 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EXECUTOR_LOCK = threading.Lock()
+_SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+def _get_shared_executor() -> ThreadPoolExecutor:
+    global _SHARED_EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _SHARED_EXECUTOR is None:
+            _SHARED_EXECUTOR = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="mt5-client",
+            )
+        return _SHARED_EXECUTOR
+
+
+def _shutdown_shared_executor() -> None:
+    global _SHARED_EXECUTOR
+    with _EXECUTOR_LOCK:
+        executor = _SHARED_EXECUTOR
+        _SHARED_EXECUTOR = None
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=False)
+
+
+atexit.register(_shutdown_shared_executor)
 
 
 class MT5Error(Exception):
@@ -49,25 +78,43 @@ class MT5Client:
             raise ValueError(f"Mode de trading invalide: {trading_mode!r}")
 
         self._mt5 = mt5_api if mt5_api is not None else mt5
-        self.trading_mode = normalized_mode
+        self._mutation_lock = threading.RLock()
+        self._trading_mode = normalized_mode
         self._trading_armed: bool = False
         self._initialized: bool = False
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="mt5-client",
-        )
+
+    @staticmethod
+    def shutdown_shared_executor() -> None:
+        """Ferme l'executant MT5 global; un prochain appel le recreera."""
+        _shutdown_shared_executor()
 
     def arm_trading(self) -> None:
         """Arme les mutations en memoire pour cette instance uniquement."""
-        self._trading_armed = True
+        with self._mutation_lock:
+            self._trading_armed = True
 
     def disarm_trading(self) -> None:
         """Desarme immediatement toutes les mutations."""
-        self._trading_armed = False
+        with self._mutation_lock:
+            self._trading_armed = False
 
     @property
     def is_trading_armed(self) -> bool:
-        return self._trading_armed
+        with self._mutation_lock:
+            return self._trading_armed
+
+    @property
+    def trading_mode(self) -> str:
+        with self._mutation_lock:
+            return self._trading_mode
+
+    @trading_mode.setter
+    def trading_mode(self, value: str) -> None:
+        normalized_mode = value.lower()
+        if normalized_mode not in VALID_TRADING_MODES:
+            raise ValueError(f"Mode de trading invalide: {value!r}")
+        with self._mutation_lock:
+            self._trading_mode = normalized_mode
 
     def _require_api(self):
         if self._mt5 is None:
@@ -78,17 +125,21 @@ class MT5Client:
 
     async def _mutation_refusal(self) -> Optional[dict]:
         """Retourne un refus, ou None si la mutation est explicitement autorisee."""
-        if self.trading_mode == "live":
+        with self._mutation_lock:
+            trading_mode = self._trading_mode
+            trading_armed = self._trading_armed
+
+        if trading_mode == "live":
             return {
                 "success": False,
                 "error": "Mutation MT5 refusee: mode live reconnu mais non implemente.",
             }
-        if self.trading_mode != "demo":
+        if trading_mode != "demo":
             return {
                 "success": False,
-                "error": f"Mutation MT5 refusee: mode {self.trading_mode} en lecture seule.",
+                "error": f"Mutation MT5 refusee: mode {trading_mode} en lecture seule.",
             }
-        if not self._trading_armed:
+        if not trading_armed:
             return {
                 "success": False,
                 "error": "Mutation MT5 refusee: armement explicite requis.",
@@ -111,6 +162,79 @@ class MT5Client:
                 "error": "Mutation MT5 refusee: le compte confirme n'est pas un compte demo.",
             }
         return None
+
+    def _guarded_order_send(self, request: dict) -> tuple[Optional[dict], Any, Any]:
+        """Valide l'etat final et envoie atomiquement dans le thread MT5."""
+        with self._mutation_lock:
+            if self._trading_mode == "live":
+                return (
+                    {
+                        "success": False,
+                        "error": (
+                            "Mutation MT5 refusee: mode live reconnu mais non implemente."
+                        ),
+                    },
+                    None,
+                    None,
+                )
+            if self._trading_mode != "demo":
+                return (
+                    {
+                        "success": False,
+                        "error": (
+                            f"Mutation MT5 refusee: mode {self._trading_mode} "
+                            "en lecture seule."
+                        ),
+                    },
+                    None,
+                    None,
+                )
+            if not self._trading_armed:
+                return (
+                    {
+                        "success": False,
+                        "error": "Mutation MT5 refusee: armement explicite requis.",
+                    },
+                    None,
+                    None,
+                )
+
+            api = self._require_api()
+            account = api.account_info()
+            if account is None:
+                return (
+                    {
+                        "success": False,
+                        "error": "Mutation MT5 refusee: compte MT5 non confirme.",
+                    },
+                    None,
+                    None,
+                )
+            if getattr(account, "trade_mode", None) != api.ACCOUNT_TRADE_MODE_DEMO:
+                return (
+                    {
+                        "success": False,
+                        "error": (
+                            "Mutation MT5 refusee: le compte confirme "
+                            "n'est pas un compte demo."
+                        ),
+                    },
+                    None,
+                    None,
+                )
+
+            result = api.order_send(request)
+            last_error = api.last_error() if result is None else None
+            return None, result, last_error
+
+    async def _send_guarded_order(self, request: dict) -> dict:
+        refusal, result, last_error = await self._run_blocking(
+            self._guarded_order_send,
+            request,
+        )
+        if refusal is not None:
+            return refusal
+        return self._parse_result(result, request, last_error)
 
     # ------------------------------------------------------------------
     # Cycle de vie de la connexion
@@ -262,6 +386,23 @@ class MT5Client:
             })
         return result
 
+    async def get_closed_profit(self, ticket: int) -> Optional[float]:
+        """Retourne le profit du dernier deal de fermeture des dernieres 24 h."""
+        api = self._require_api()
+        to_date = datetime.now()
+        deals = await self._run_blocking(
+            api.history_deals_get,
+            to_date - timedelta(days=1),
+            to_date,
+            position=ticket,
+        )
+        if not deals:
+            return None
+        for deal in reversed(deals):
+            if deal.entry == api.DEAL_ENTRY_OUT:
+                return deal.profit
+        return None
+
     # ------------------------------------------------------------------
     # Prix et donnees de marche
     # ------------------------------------------------------------------
@@ -376,8 +517,7 @@ class MT5Client:
         if tp is not None:
             request["tp"] = tp
 
-        result = await self._run_blocking(api.order_send, request)
-        return await self._parse_result(result, request)
+        return await self._send_guarded_order(request)
 
     async def close_position(
         self,
@@ -427,8 +567,7 @@ class MT5Client:
             "type_filling": api.ORDER_FILLING_IOC,
         }
 
-        result = await self._run_blocking(api.order_send, request)
-        parsed = await self._parse_result(result, request)
+        parsed = await self._send_guarded_order(request)
         if parsed["success"]:
             parsed["closed_symbol"] = symbol
             parsed["closed_volume"] = volume
@@ -500,8 +639,7 @@ class MT5Client:
         if tp is not None:
             request["tp"] = tp
 
-        result = await self._run_blocking(api.order_send, request)
-        return await self._parse_result(result, request)
+        return await self._send_guarded_order(request)
 
     # ------------------------------------------------------------------
     # Utilitaires internes
@@ -513,24 +651,23 @@ class MT5Client:
         """
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
-            self._executor,
+            _get_shared_executor(),
             lambda: func(*args, **kwargs),
         )
 
-    async def _parse_result(self, result, request: dict) -> dict:
+    def _parse_result(self, result, request: dict, last_error=None) -> dict:
         """
         Normalise le resultat de mt5.order_send() en dictionnaire.
         Gere les differents codes de retour MT5.
         """
-        api = self._require_api()
         if result is None:
-            error = await self._run_blocking(api.last_error)
             return {
                 "success": False,
-                "retcode": error[0] if error else -1,
-                "error": f"Erreur MT5 : {error}",
+                "retcode": last_error[0] if last_error else -1,
+                "error": f"Erreur MT5 : {last_error}",
             }
 
+        api = self._require_api()
         retcode = result.retcode
 
         if retcode == api.TRADE_RETCODE_DONE:

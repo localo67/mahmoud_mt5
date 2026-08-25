@@ -23,7 +23,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from config import TELEGRAM_TOKEN, AUTHORIZED_CHAT_ID, validate_config
+from config import TELEGRAM_TOKEN, AUTHORIZED_CHAT_ID, TRADING_MODE, validate_config
 from mt5_client import MT5Client
 from ai_engine import AIEngine
 from tools.dispatcher import Dispatcher
@@ -55,6 +55,13 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 
 logger = logging.getLogger("bot")
+
+
+async def initialize_mt5_for_runtime(mt5_client, trading_mode: str):
+    """Initialise MT5 uniquement pour les modes qui en dependent."""
+    if trading_mode == "off":
+        return None
+    return await mt5_client.initialize()
 
 # ------------------------------------------------------------------
 # Middleware de securite
@@ -149,11 +156,14 @@ async def main() -> None:
     logger.info(f"Chat autorise : {AUTHORIZED_CHAT_ID}")
 
     # 2. Initialiser le client MT5
-    logger.info("Initialisation de la connexion MT5...")
     mt5 = MT5Client()
-    init_ok = await mt5.initialize()
+    init_ok = await initialize_mt5_for_runtime(mt5, TRADING_MODE)
 
-    if not init_ok:
+    if init_ok is None:
+        logger.info(
+            "TRADING_MODE=off : runtime non-MT5, initialisation MT5 ignoree."
+        )
+    elif not init_ok:
         logger.error(
             " ECHEC de connexion a MetaTrader 5.\n"
             "   - Le terminal MT5 est-il ouvert ?\n"
@@ -260,6 +270,7 @@ async def main() -> None:
     if mt5.is_connected:
         await mt5.shutdown()
         logger.info("MT5 deconnecte.")
+    MT5Client.shutdown_shared_executor()
 
     logger.info("Bot arrete proprement. A bientot ! ")
 

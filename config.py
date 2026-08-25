@@ -38,10 +38,13 @@ def validate_config() -> bool:
         "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
         "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
         "AUTHORIZED_CHAT_ID": AUTHORIZED_CHAT_ID,
-        "MT5_LOGIN": MT5_LOGIN,
-        "MT5_PASSWORD": MT5_PASSWORD,
-        "MT5_SERVER": MT5_SERVER,
     }
+    if TRADING_MODE in {"shadow", "demo", "live"}:
+        required.update({
+            "MT5_LOGIN": MT5_LOGIN,
+            "MT5_PASSWORD": MT5_PASSWORD,
+            "MT5_SERVER": MT5_SERVER,
+        })
 
     missing = [name for name, value in required.items() if not value]
 

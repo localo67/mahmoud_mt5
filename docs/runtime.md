@@ -19,6 +19,11 @@ L'armement n'est ni lu depuis l'environnement ni persiste. Une nouvelle instance
 est toujours desarmee. `TRADING_MODE=live` est reconnu mais refuse : le trading
 live n'est pas implemente au jalon J0.
 
+La derniere verification du mode, de l'armement et du type de compte est
+executee atomiquement avec `order_send`. Tous les appels MT5 de toutes les
+instances partagent un executant mono-thread, ferme explicitement par le bot et
+par un hook de fin de processus.
+
 Avant toute utilisation demo, un smoke test manuel reste obligatoire sur une
 machine Windows avec terminal MT5 ouvert, compte demo verifie et trading
 algorithmique active. Ce test ne peut pas etre execute depuis Debian.
@@ -35,6 +40,10 @@ pour les tests par injection d'une API factice. Les usages autorises sont :
 `run.sh` force `TRADING_MODE=off`. Il ne fournit aucun acces trading, meme si une
 autre valeur est presente dans le fichier d'environnement.
 L'unite `systemd/xauusd-bot.service` force egalement ce mode.
+
+En mode `off`, les identifiants MT5 ne sont pas requis et le bot n'essaie pas
+d'initialiser MT5. Les modes `shadow`, `demo` et `live` dependent des lectures
+MT5 et exigent donc `MT5_LOGIN`, `MT5_PASSWORD` et `MT5_SERVER`.
 
 Installation de developpement :
 

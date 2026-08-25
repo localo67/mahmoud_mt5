@@ -418,27 +418,7 @@ class StrategyEngine:
 
     async def _get_closed_profit(self, ticket: int) -> Optional[float]:
         """Recupere le profit/perte d'une position fermee via l'historique MT5."""
-        import MetaTrader5 as mt5
-        from datetime import datetime as dt, timedelta
-
-        try:
-            # Chercher dans l'historique des deals des dernieres 24h
-            from_date = dt.now() - timedelta(days=1)
-            deals = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: mt5.history_deals_get(
-                    from_date, dt.now(),
-                    position=ticket
-                )
-            )
-            if deals:
-                # Le dernier deal de fermeture a le profit
-                for deal in reversed(deals):
-                    if deal.entry == mt5.DEAL_ENTRY_OUT:
-                        return deal.profit
-            return None
-        except Exception:
-            return None
+        return await self.mt5.get_closed_profit(ticket)
 
     async def _apply_trailing_stop(self, position: dict) -> None:
         try:

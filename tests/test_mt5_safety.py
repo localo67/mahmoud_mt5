@@ -163,6 +163,75 @@ async def test_all_mt5_calls_are_serialized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mt5_calls_are_serialized_across_client_instances() -> None:
+    first_api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    second_api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    lock = threading.Lock()
+    active_calls = 0
+    max_active_calls = 0
+
+    def slow_tick(symbol: str):
+        nonlocal active_calls, max_active_calls
+        with lock:
+            active_calls += 1
+            max_active_calls = max(max_active_calls, active_calls)
+        time.sleep(0.05)
+        with lock:
+            active_calls -= 1
+        return SimpleNamespace(bid=2500.0, ask=2500.2, time=0)
+
+    first_api.symbol_info_tick = slow_tick
+    second_api.symbol_info_tick = slow_tick
+    first = MT5Client(mt5_api=first_api)
+    second = MT5Client(mt5_api=second_api)
+
+    await asyncio.gather(
+        first.get_current_price("XAUUSD"),
+        second.get_current_price("EURUSD"),
+    )
+
+    assert max_active_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_executor_can_shutdown_and_restart_cleanly() -> None:
+    api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    client = MT5Client(mt5_api=api)
+    await client.get_current_price("XAUUSD")
+
+    MT5Client.shutdown_shared_executor()
+
+    assert not any(
+        thread.name.startswith("mt5-client") and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+    price = await client.get_current_price("XAUUSD")
+    assert price["bid"] == 2500.0
+
+
+@pytest.mark.asyncio
+async def test_closed_profit_history_runs_through_serialized_client() -> None:
+    api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    api.DEAL_ENTRY_OUT = 1
+    history_calls: list[tuple[int, str]] = []
+
+    def history_deals_get(from_date, to_date, *, position: int):
+        history_calls.append((position, threading.current_thread().name))
+        return [
+            SimpleNamespace(entry=0, profit=0.0),
+            SimpleNamespace(entry=api.DEAL_ENTRY_OUT, profit=7.5),
+        ]
+
+    api.history_deals_get = history_deals_get
+    client = MT5Client(mt5_api=api)
+
+    profit = await client.get_closed_profit(123)
+
+    assert profit == 7.5
+    assert history_calls == [(123, "mt5-client_0")]
+
+
+@pytest.mark.asyncio
 async def test_last_error_also_runs_on_the_dedicated_mt5_thread() -> None:
     api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
     call_threads: list[str] = []
@@ -185,3 +254,66 @@ async def test_last_error_also_runs_on_the_dedicated_mt5_thread() -> None:
     assert result["success"] is False
     assert len(set(call_threads)) == 1
     assert call_threads[0].startswith("mt5-client")
+
+
+@pytest.mark.asyncio
+async def test_disarm_after_price_read_prevents_order_send() -> None:
+    api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    client = MT5Client(mt5_api=api, trading_mode="demo")
+    client.arm_trading()
+    original_get_price = client.get_current_price
+
+    async def get_price_then_disarm(symbol: str) -> dict:
+        price = await original_get_price(symbol)
+        client.disarm_trading()
+        return price
+
+    client.get_current_price = get_price_then_disarm
+
+    result = await client.open_order("XAUUSD", "buy", 0.01)
+
+    assert result["success"] is False
+    assert "armement" in result["error"].lower()
+    assert api.order_requests == []
+
+
+@pytest.mark.asyncio
+async def test_account_change_after_price_read_prevents_order_send() -> None:
+    api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    client = MT5Client(mt5_api=api, trading_mode="demo")
+    client.arm_trading()
+    original_get_price = client.get_current_price
+
+    async def get_price_then_switch_account(symbol: str) -> dict:
+        price = await original_get_price(symbol)
+        api.account_trade_mode = FakeMT5.ACCOUNT_TRADE_MODE_REAL
+        return price
+
+    client.get_current_price = get_price_then_switch_account
+
+    result = await client.open_order("XAUUSD", "buy", 0.01)
+
+    assert result["success"] is False
+    assert "compte demo" in result["error"].lower()
+    assert api.order_requests == []
+
+
+@pytest.mark.asyncio
+async def test_mode_change_after_price_read_prevents_order_send() -> None:
+    api = FakeMT5(FakeMT5.ACCOUNT_TRADE_MODE_DEMO)
+    client = MT5Client(mt5_api=api, trading_mode="demo")
+    client.arm_trading()
+    original_get_price = client.get_current_price
+
+    async def get_price_then_disable(symbol: str) -> dict:
+        price = await original_get_price(symbol)
+        client.trading_mode = "off"
+        return price
+
+    client.get_current_price = get_price_then_disable
+
+    result = await client.open_order("XAUUSD", "buy", 0.01)
+
+    assert result["success"] is False
+    assert "lecture seule" in result["error"].lower()
+    assert api.order_requests == []

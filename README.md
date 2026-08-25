@@ -110,6 +110,9 @@ Variables requises :
 | `MT5_PASSWORD` | Mot de passe MT5 |
 | `MT5_SERVER` | Nom du serveur du broker |
 
+Les trois variables MT5 ne sont pas requises en mode `off`. Elles sont requises
+en modes `shadow`, `demo` et `live`, car ces modes dependent des lectures MT5.
+
 > Pour obtenir votre `AUTHORIZED_CHAT_ID`, envoyez un message a [@userinfobot](https://t.me/userinfobot) sur Telegram.
 
 ### 3. Lancer le bot
