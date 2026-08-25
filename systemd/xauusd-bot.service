@@ -1,0 +1,18 @@
+[Unit]
+Description=MT5 AI XAUUSD Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trader
+WorkingDirectory=/opt/mt5-ai-bot
+ExecStart=/opt/mt5-ai-bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+EnvironmentFile=/opt/mt5-ai-bot/.env
+
+[Install]
+WantedBy=multi-user.target

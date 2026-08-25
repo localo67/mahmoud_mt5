@@ -1,0 +1,16 @@
+# Docker Compose — bot IA + Telegram uniquement
+# MT5 doit tourner sur la machine hote (Windows) ou via Wine.
+# Pour du simulation uniquement : decommenter MT5_MODE=mock
+version: "3.8"
+
+services:
+  bot:
+    build: .
+    container_name: mt5-ai-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./state.json:/app/state.json
+      - ./logs:/app/logs
+    # Pas de port expose — le bot fait du polling Telegram
