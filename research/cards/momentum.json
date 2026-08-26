@@ -1,0 +1,8 @@
+{
+  "name": "momentum",
+  "version": "0.1",
+  "combinable_with_champion": false,
+  "holdout": "momentum-holdout-reserved",
+  "status": "not_evaluated",
+  "note": "Challenger separe. Interdit de le mixer au champion avant validation independante."
+}

@@ -1,0 +1,32 @@
+{
+  "name": "session_breakout",
+  "version": "1.0",
+  "legacy_breakout_retest": false,
+  "hypothesis": "Liquidity expansion after the New York opening range can continue after spread.",
+  "allow_overnight": false,
+  "params": {
+    "opening_range_minutes": 30,
+    "attempts_per_session": 1,
+    "buffer_mode": "max_spread_or_atr_k",
+    "atr_k": 0.2,
+    "reward_risk": 1.5,
+    "time_exit": "session_end"
+  },
+  "splits": {
+    "development": "synthetic-dev",
+    "walk_forward": "synthetic-wf",
+    "holdout": "synthetic-holdout-once"
+  },
+  "costs": {
+    "nominal_spread": "observed",
+    "adverse": "high_percentile",
+    "severe": "spread_and_slippage_x2"
+  },
+  "rejection": {
+    "holdout_retune": "forbidden",
+    "min_oos_trades_floor": 100,
+    "min_trades_per_regime": 30
+  },
+  "status": "software_gates_only",
+  "note": "Synthetic fixtures validate the gates. They do not prove a live edge."
+}
