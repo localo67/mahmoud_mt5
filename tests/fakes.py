@@ -40,6 +40,7 @@ class FakeMT5:
     ORDER_FILLING_FOK = 2
     ORDER_FILLING_RETURN = 3
     TRADE_RETCODE_DONE = 10009
+    TRADE_RETCODE_DONE_PARTIAL = 10010
     TRADE_RETCODE_INVALID_FILL = 10030
     TRADE_RETCODE_MARKET_CLOSED = 10018
     TIMEFRAME_M1 = 1
@@ -75,6 +76,11 @@ class FakeMT5:
         self.check_requests: list[dict] = []
         self.selected: set[str] = set(self.symbols)
         self.positions: list = []
+        self.deals: list = []
+        self.timeout_send: bool = False
+        self.fail_before_send: bool = False
+        self.partial_volume: float | None = None
+        self._next_ticket: int = 987
         self.initialized = True
 
     def initialize(self) -> bool:
@@ -191,8 +197,67 @@ class FakeMT5:
         return FakeCheckResult(self.check_retcode, "ok")
 
     def order_send(self, request: dict):
+        if self.fail_before_send:
+            raise TimeoutError("timeout before send")
         self.order_requests.append(request)
-        return SimpleNamespace(retcode=self.TRADE_RETCODE_DONE, order=987, comment="done")
+        ticket = self._next_ticket
+        self._next_ticket += 1
+        filled = (
+            self.partial_volume
+            if self.partial_volume is not None
+            else request.get("volume", 0.0)
+        )
+        position = SimpleNamespace(
+            ticket=ticket,
+            symbol=request.get("symbol"),
+            type=request.get("type", self.ORDER_TYPE_BUY),
+            volume=filled,
+            price_open=request.get("price", 0.0),
+            price_current=request.get("price", 0.0),
+            sl=request.get("sl", 0.0),
+            tp=request.get("tp", 0.0),
+            profit=0.0,
+            swap=0.0,
+            commission=0.0,
+            comment=request.get("comment", ""),
+            time=self.tick_time,
+            identifier=ticket,
+            magic=request.get("magic", 0),
+        )
+        self.positions.append(position)
+        self.deals.append(
+            SimpleNamespace(
+                ticket=ticket + 1000,
+                order=ticket,
+                position_id=ticket,
+                symbol=request.get("symbol"),
+                volume=filled,
+                price=request.get("price", 0.0),
+                profit=0.0,
+                commission=0.0,
+                swap=0.0,
+                entry=0,
+                magic=request.get("magic", 0),
+                comment=request.get("comment", ""),
+            )
+        )
+        if self.timeout_send:
+            raise TimeoutError("timeout after send")
+        retcode = (
+            self.TRADE_RETCODE_DONE_PARTIAL
+            if self.partial_volume is not None
+            else self.TRADE_RETCODE_DONE
+        )
+        return SimpleNamespace(
+            retcode=retcode,
+            order=ticket,
+            deal=ticket + 1000,
+            volume=filled,
+            comment="done",
+        )
 
     def history_deals_get(self, *args, **kwargs):
+        return list(self.deals)
+
+    def orders_get(self, *args, **kwargs):
         return []

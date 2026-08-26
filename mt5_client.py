@@ -388,6 +388,7 @@ class MT5Client:
                 "comment": p.comment,
                 "time": p.time,
                 "identifier": p.identifier,
+                "magic": getattr(p, "magic", 0),
             })
         return result
 
@@ -531,6 +532,8 @@ class MT5Client:
         volume: float,
         sl: Optional[float] = None,
         tp: Optional[float] = None,
+        filling: Optional[int] = None,
+        comment: str = "preflight-check",
     ) -> dict:
         """Valide un ordre via order_check, sans jamais appeler order_send."""
         api = self._require_api()
@@ -545,9 +548,9 @@ class MT5Client:
             "price": price,
             "deviation": DEVIATION_PIPS,
             "magic": MAGIC_NUMBER,
-            "comment": "preflight-check",
+            "comment": comment,
             "type_time": api.ORDER_TIME_GTC,
-            "type_filling": api.ORDER_FILLING_IOC,
+            "type_filling": filling if filling is not None else api.ORDER_FILLING_IOC,
         }
         if sl is not None:
             request["sl"] = sl
@@ -695,6 +698,7 @@ class MT5Client:
         sl: Optional[float] = None,
         tp: Optional[float] = None,
         comment: str = "MT5 AI Bot",
+        filling: Optional[int] = None,
     ) -> dict:
         """
         Ouvre une position au marche.
@@ -731,7 +735,7 @@ class MT5Client:
             "magic": MAGIC_NUMBER,
             "comment": comment,
             "type_time": api.ORDER_TIME_GTC,
-            "type_filling": api.ORDER_FILLING_IOC,
+            "type_filling": filling if filling is not None else api.ORDER_FILLING_IOC,
         }
 
         if sl is not None:
@@ -892,14 +896,17 @@ class MT5Client:
         api = self._require_api()
         retcode = result.retcode
 
-        if retcode == api.TRADE_RETCODE_DONE:
+        done_partial = getattr(api, "TRADE_RETCODE_DONE_PARTIAL", None)
+        if retcode == api.TRADE_RETCODE_DONE or retcode == done_partial:
             return {
                 "success": True,
                 "ticket": result.order,
-                "volume": request.get("volume", 0),
+                "deal": getattr(result, "deal", None),
+                "volume": getattr(result, "volume", request.get("volume", 0)),
                 "price": request.get("price", 0),
                 "retcode": retcode,
                 "comment": result.comment,
+                "partial": retcode == done_partial,
             }
 
         # Mapping des codes d'erreur courants
