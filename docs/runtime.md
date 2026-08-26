@@ -13,7 +13,10 @@ trois conditions suivantes sont reunies :
 1. `TRADING_MODE=demo` ;
 2. l'API MT5 confirme `ACCOUNT_TRADE_MODE_DEMO` ;
 3. l'instance `MT5Client` a ete explicitement armee en memoire avec
-   `arm_trading()`.
+   `arm_trading()` (lancement `python bot.py --arm-demo`).
+
+Telegram ne peut pas armer. Sans `--arm-demo`, le mode demo observe et n'envoie
+aucun ordre.
 
 Le runtime passe par un service unique `ExecutionGateway` :
 

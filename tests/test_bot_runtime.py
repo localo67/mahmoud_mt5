@@ -35,3 +35,31 @@ async def test_mt5_runtime_modes_initialize_client(mode: str) -> None:
 
     assert result is True
     assert client.initialize_calls == 1
+
+
+def test_arm_demo_flag_requires_demo_mode() -> None:
+    args = bot.parse_args([])
+    assert args.arm_demo is False
+    args = bot.parse_args(["--arm-demo"])
+    assert args.arm_demo is True
+
+    class FakeClient:
+        trading_mode = "off"
+
+        def arm_trading(self):
+            raise AssertionError("ne doit pas armer hors demo")
+
+    assert bot.arm_demo_if_requested(FakeClient(), True) is False
+
+
+def test_arm_demo_flag_arms_demo_client() -> None:
+    class FakeClient:
+        trading_mode = "demo"
+        armed = False
+
+        def arm_trading(self):
+            self.armed = True
+
+    client = FakeClient()
+    assert bot.arm_demo_if_requested(client, True) is True
+    assert client.armed is True

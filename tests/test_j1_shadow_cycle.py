@@ -73,6 +73,20 @@ async def test_no_signal_is_logged_as_wait() -> None:
 
 
 @pytest.mark.asyncio
+async def test_demo_unarmed_does_not_send() -> None:
+    api = FakeMT5()
+    client = MT5Client(mt5_api=api, trading_mode="demo")
+    now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+    engine = make_engine(client, decision=AlwaysBuy(), now=now)
+
+    result = await engine.evaluate_closed_candle()
+
+    assert result.outcome == "BLOCKED"
+    assert Blocker.NOT_ARMED.value in result.blockers
+    assert api.order_requests == []
+
+
+@pytest.mark.asyncio
 async def test_position_existing_blocks_without_send() -> None:
     api = FakeMT5()
     api.positions = [

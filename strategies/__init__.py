@@ -1,3 +1,1 @@
-"""
-Strategies de trading scalping pour XAUUSD M5.
-"""
+"""Strategie determinee XAUUSD : breakout de session New York."""

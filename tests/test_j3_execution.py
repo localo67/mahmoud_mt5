@@ -264,3 +264,13 @@ async def test_persist_failure_before_send_never_sends(tmp_path: Path) -> None:
     result = await gateway.submit(_order())
     assert result.status == "REJECTED"
     assert api.order_requests == []
+
+
+@pytest.mark.asyncio
+async def test_unarmed_demo_never_sends(tmp_path: Path) -> None:
+    api = FakeMT5()
+    gateway = _gateway(tmp_path, client=_client(api, armed=False))
+    result = await gateway.submit(_order())
+    assert result.status == "REJECTED"
+    assert result.comment == "not armed"
+    assert api.order_requests == []

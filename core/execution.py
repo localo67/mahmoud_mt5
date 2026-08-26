@@ -118,6 +118,16 @@ class ExecutionGateway:
             self.ledger.append(order.decision_id, "result", result.__dict__)
             return result
 
+        if not getattr(self.adapter, "simulated", False) and not getattr(
+            self.mt5, "is_trading_armed", False
+        ):
+            result = ExecutionResult(
+                order.decision_id, "REJECTED", comment="not armed"
+            )
+            self.ledger.append(order.decision_id, "rejected", result.__dict__)
+            self.ledger.append(order.decision_id, "result", result.__dict__)
+            return result
+
         send_attempt_id = self._send_attempt_id(order)
         try:
             persisted = self.ledger.append(

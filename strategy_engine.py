@@ -296,6 +296,13 @@ class StrategyEngine:
             client_order_id=f"c:{intent.decision_id}",
         )
 
+        if (
+            trading_mode == "demo"
+            and not getattr(self.mt5, "is_trading_armed", False)
+        ):
+            blockers.append(Blocker.NOT_ARMED.value)
+            return self._record_cycle(CycleResult(candle_time, blockers, "BLOCKED", details))
+
         if self.execution is not None:
             result = await self.execution.submit(order)
             details["execution"] = {"status": result.status, "ambiguous": result.ambiguous}

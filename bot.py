@@ -4,11 +4,13 @@ Bot de trading MT5 + IA + Telegram.
 Point d'entree principal : assemble tous les composants et demarre l'application.
 
 Usage :
-    python bot.py
+    python bot.py --arm-demo
+    (TRADING_MODE=demo dans .env, compte MT5 demo, Windows)
 
 Arret : Ctrl+C (arret propre avec deconnexion MT5)
 """
 
+import argparse
 import asyncio
 import logging
 import signal
@@ -55,6 +57,32 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 
 logger = logging.getLogger("bot")
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Bot XAUUSD MetaTrader 5")
+    parser.add_argument(
+        "--arm-demo",
+        action="store_true",
+        help="Autorise les ordres sur un compte demo (argent fictif). Pas persiste.",
+    )
+    return parser.parse_args(argv)
+
+
+def arm_demo_if_requested(mt5_client, arm_demo: bool) -> bool:
+    """Arme les ordres demo uniquement si demande explicitement au lancement."""
+    if not arm_demo:
+        if getattr(mt5_client, "trading_mode", TRADING_MODE) == "demo":
+            logger.warning(
+                "TRADING_MODE=demo sans --arm-demo: le bot observe, aucun ordre envoye."
+            )
+        return True
+    if getattr(mt5_client, "trading_mode", TRADING_MODE) != "demo":
+        logger.error("--arm-demo n'est autorise qu'avec TRADING_MODE=demo")
+        return False
+    mt5_client.arm_trading()
+    logger.warning("DEMO ARME: le bot peut envoyer des ordres sur le compte fictif.")
+    return True
 
 
 async def initialize_mt5_for_runtime(mt5_client, trading_mode: str):
@@ -141,11 +169,12 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # Point d'entree principal
 # ------------------------------------------------------------------
 
-async def main() -> None:
+async def main(argv=None) -> None:
     """Fonction principale asynchrone."""
+    args = parse_args(argv)
 
     logger.info("=" * 50)
-    logger.info("  MT5 AI Trading Bot - Demarrage")
+    logger.info("  MT5 XAUUSD Bot - Demarrage")
     logger.info("=" * 50)
 
     # 1. Valider la configuration
@@ -157,6 +186,8 @@ async def main() -> None:
 
     # 2. Initialiser le client MT5
     mt5 = MT5Client()
+    if not arm_demo_if_requested(mt5, args.arm_demo):
+        return
     init_ok = await initialize_mt5_for_runtime(mt5, TRADING_MODE)
 
     if init_ok is None:

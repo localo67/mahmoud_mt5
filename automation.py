@@ -67,7 +67,8 @@ class AutomationEngine:
     ):
         self.app = application
         self.mt5 = mt5_client
-        self.enabled: bool = False
+        mode = getattr(mt5_client, "trading_mode", TRADING_MODE)
+        self.enabled: bool = mode in {"shadow", "demo"}
         self.news_filter = NewsFilter(fail_safe=True)
         self.ledger = Ledger(Path(ledger_path or "data/ledger.sqlite"))
         self.controls = OperationalControl(Path(control_path or "data/control.json"))
@@ -84,7 +85,6 @@ class AutomationEngine:
             now=lambda: datetime.now(timezone.utc),
             state_path=Path(state_path or STATE_FILE),
         )
-        mode = getattr(mt5_client, "trading_mode", TRADING_MODE)
         if mode == "shadow":
             adapter = ShadowAdapter(mt5_client, magic=MAGIC_NUMBER)
         else:
@@ -109,7 +109,7 @@ class AutomationEngine:
             controls=self.controls,
             monitor=self.monitor,
         )
-        self.engine.enabled = False
+        self.engine.enabled = self.enabled
         self.engine.chat_id = AUTHORIZED_CHAT_ID
 
     async def run(self) -> None:
