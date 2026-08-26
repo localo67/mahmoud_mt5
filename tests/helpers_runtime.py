@@ -126,6 +126,7 @@ def make_engine(client, decision=None, risk=None, execution=None, ledger=None, n
         market_data=kwargs.get("market_data"),
         controls=kwargs.get("controls"),
         monitor=kwargs.get("monitor"),
+        pack=kwargs.get("pack"),
     )
     engine.enabled = True
     if now is not None:

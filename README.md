@@ -1,67 +1,60 @@
-# MT5 XAUUSD Bot
+# MT5 Demo Bot (packs de strategies)
 
-Bot personnel pour MetaTrader 5. Il surveille **l'or** (`XAUUSD`) et peut
-ouvrir **au plus un trade par jour** pendant la seance de New York, selon une
-regle fixe (casse du range d'ouverture). L'IA Telegram ne decide pas les
-achats/ventes.
+Bot autonome pour **compte demo** MetaTrader 5. Une strategie a la fois.
+Le mode `live` (argent reel) est refuse.
 
-Le mode `live` (argent reel) est refuse. Utilise un **compte demo**.
+Aucune strategie n'est garantie gagnante. Les logs disent si ca trade, et pourquoi pas.
 
 ---
 
-## Tester en demo (Windows)
+## Windows (ce que tu lances)
 
-MetaTrader 5 ne fonctionne **pas** sur Linux. Il te faut un PC Windows.
-
-1. Installe [MetaTrader 5](https://www.metatrader5.com/) et ouvre un **compte demo**.
-2. Dans MT5 : Outils → Options → Expert Advisors → coche **Autoriser le trading algorithmique**.
-3. Laisse le terminal MT5 **ouvert et connecte**.
-4. Copie le projet, puis :
+MetaTrader 5 ouvert, compte **demo**, trading algorithmique coche.
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env
+git pull
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+.\scripts\windows\00-setup.ps1
 ```
 
-5. Remplis `.env` : Telegram, OpenRouter, `TRADING_MODE=demo`, login / mot de passe / serveur MT5.
-6. Lance :
+Edite `.env` :
+
+```
+TRADING_MODE=demo
+MT5_LOGIN=...
+MT5_PASSWORD=...
+MT5_SERVER=...
+```
+
+Telegram n'est **pas** obligatoire pour ces scripts.
 
 ```powershell
-python bot.py --arm-demo
+.\scripts\windows\01-test-connexion.ps1
+.\scripts\windows\run-scalp-eurusd.ps1
 ```
 
-Sans `--arm-demo`, le bot se connecte mais **n'envoie aucun ordre**.
-Telegram (`/auto`, `/reset`) ne peut pas armer le trading.
+Ordre de test :
 
-Arret : `Ctrl+C`. Au prochain lancement, le bot est **desarme** jusqu'a ce que tu remettes `--arm-demo`.
+1. `.\scripts\windows\run-scalp-eurusd.ps1`  (premier, spread plus petit)
+2. `.\scripts\windows\run-scalp-xauusd.ps1`
+3. `.\scripts\windows\run-breakout-xauusd.ps1`
 
----
+Un seul `run-*.ps1` a la fois. Arret : `Ctrl+C`.
+Au relancement, il faut re-lancer le script (l'armement n'est pas sauvegarde).
 
-## A quoi s'attendre
-
-Ce n'est **pas** du scalping rapide. Beaucoup de jours : **zero trade**.
-
-Un ordre n'est possible que si tout ceci est vrai en meme temps :
-
-- jour de semaine, seance New York (9h–17h heure de New York)
-- les 30 premieres minutes ont un haut et un bas
-- une bougie M5 **suivante** casse clairement ce haut ou ce bas
-- pas de position deja ouverte, spread pas trop large, limites de perte OK
-
-Sinon tu verras dans les logs `WAIT`, `NO_SIGNAL` ou `OUTSIDE_SESSION`. C'est normal.
+Logs : `logs\<nom-du-pack>.log`
 
 ---
 
-## Autres modes (tu peux les ignorer)
+## Packs
 
-| Mode | Role |
+| Dossier | Idee |
 | --- | --- |
-| `off` | Defaut sur Linux : tests et Telegram, sans MT5 |
-| `shadow` | Connecte a MT5, calcule, **n'envoie jamais** d'ordre |
-| `demo` | Ordres reels sur compte fictif, si `--arm-demo` |
-| `live` | Refuse |
+| `packs/scalp_eurusd_m1` | Scalp M1 EURUSD, TP au moins 4x le spread |
+| `packs/scalp_xauusd_m1` | Meme idee sur l'or |
+| `packs/session_breakout_xauusd` | 1 trade/jour, cassure New York |
+
+Chaque pack a son journal SQLite dans `data/` pour ne pas melanger les resultats.
 
 ---
 
@@ -73,5 +66,3 @@ source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
 python -m pytest
 ```
-
-`run.sh` force `TRADING_MODE=off`. Voir [docs/runtime.md](docs/runtime.md).

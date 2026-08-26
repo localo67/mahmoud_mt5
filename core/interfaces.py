@@ -30,8 +30,8 @@ class MarketDataProvider(Protocol):
 class DecisionEngine(Protocol):
     def evaluate(
         self,
-        bars_m5: Sequence[ClosedBar],
-        bars_m15: Sequence[ClosedBar],
+        bars_fast: Sequence[ClosedBar],
+        bars_slow: Sequence[ClosedBar],
         quote: Quote,
         spec: SymbolSpec,
     ) -> Optional[SignalIntent]:

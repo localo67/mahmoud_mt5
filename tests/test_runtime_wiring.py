@@ -26,6 +26,7 @@ def test_automation_assembles_deterministic_core(tmp_path) -> None:
     inner = engine.engine
     assert isinstance(inner.market_data, ClosedBarMarketData)
     assert isinstance(inner.decision, SessionBreakout)
+    assert inner.pack.id == "session_breakout_xauusd"
     assert isinstance(inner.risk_engine, RiskEngine)
     assert isinstance(inner.execution, ExecutionGateway)
     assert isinstance(inner.ledger, Ledger)

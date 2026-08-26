@@ -14,12 +14,12 @@ class SessionPolicy:
         start_hour: int = 9,
         end_hour: int = 17,
         allow_overnight: bool = False,
-        tz: ZoneInfo = NY_TZ,
+        tz: ZoneInfo | str = NY_TZ,
     ):
         self.start_hour = start_hour
         self.end_hour = end_hour
         self.allow_overnight = allow_overnight
-        self.tz = tz
+        self.tz = ZoneInfo(tz) if isinstance(tz, str) else tz
 
     def localize(self, moment: datetime) -> datetime:
         if moment.tzinfo is None:

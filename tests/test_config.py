@@ -87,3 +87,14 @@ def test_mt5_modes_require_mt5_credentials(
     _set_valid_non_mt5_config(monkeypatch, mode)
 
     assert config.validate_config() is False
+
+
+def test_headless_skips_telegram_requirements(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "TELEGRAM_TOKEN", "")
+    monkeypatch.setattr(config, "OPENROUTER_API_KEY", "")
+    monkeypatch.setattr(config, "AUTHORIZED_CHAT_ID", 0)
+    monkeypatch.setattr(config, "TRADING_MODE", "off")
+    monkeypatch.setattr(config, "MT5_LOGIN", 0)
+    monkeypatch.setattr(config, "MT5_PASSWORD", "")
+    monkeypatch.setattr(config, "MT5_SERVER", "")
+    assert config.validate_config(headless=True) is True

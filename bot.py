@@ -4,7 +4,7 @@ Bot de trading MT5 + IA + Telegram.
 Point d'entree principal : assemble tous les composants et demarre l'application.
 
 Usage :
-    python bot.py --arm-demo
+    python bot.py --headless --arm-demo --pack scalp_eurusd_m1
     (TRADING_MODE=demo dans .env, compte MT5 demo, Windows)
 
 Arret : Ctrl+C (arret propre avec deconnexion MT5)
@@ -13,7 +13,9 @@ Arret : Ctrl+C (arret propre avec deconnexion MT5)
 import argparse
 import asyncio
 import logging
+import os
 import signal
+from pathlib import Path
 
 from telegram import Update
 from telegram.ext import (
@@ -59,12 +61,35 @@ logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
 logger = logging.getLogger("bot")
 
 
+def configure_file_logging() -> None:
+    log_file = os.getenv("LOG_FILE")
+    if not log_file:
+        return
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logging.getLogger().addHandler(handler)
+
+
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Bot XAUUSD MetaTrader 5")
+    parser = argparse.ArgumentParser(description="Bot trading MT5 demo")
     parser.add_argument(
         "--arm-demo",
         action="store_true",
         help="Autorise les ordres sur un compte demo (argent fictif). Pas persiste.",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Sans Telegram : uniquement le moteur de trading.",
+    )
+    parser.add_argument(
+        "--pack",
+        default=None,
+        help="Id du pack (ex: scalp_eurusd_m1). Defaut: STRATEGY_PACK ou session_breakout_xauusd.",
     )
     return parser.parse_args(argv)
 
@@ -169,16 +194,44 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 # Point d'entree principal
 # ------------------------------------------------------------------
 
+async def run_headless(mt5, pack_id: str | None) -> None:
+    auto_engine = AutomationEngine(None, mt5, pack_id=pack_id)
+    logger.info("Mode headless pack=%s (Ctrl+C pour arreter)", auto_engine.pack.id)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_event_loop()
+
+    def signal_handler():
+        logger.info("Signal d'arret recu...")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            pass
+
+    automation_task = asyncio.create_task(auto_engine.run(), name="automation_engine")
+    try:
+        await stop_event.wait()
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt recu...")
+    automation_task.cancel()
+    try:
+        await automation_task
+    except asyncio.CancelledError:
+        pass
+
+
 async def main(argv=None) -> None:
     """Fonction principale asynchrone."""
+    configure_file_logging()
     args = parse_args(argv)
 
     logger.info("=" * 50)
-    logger.info("  MT5 XAUUSD Bot - Demarrage")
+    logger.info("  MT5 Demo Bot - Demarrage")
     logger.info("=" * 50)
 
-    # 1. Valider la configuration
-    if not validate_config():
+    if not validate_config(headless=args.headless):
         logger.error("Configuration invalide. Verifiez votre fichier .env")
         return
 
@@ -203,6 +256,20 @@ async def main(argv=None) -> None:
             "Le bot demarre sans MT5 (commandes IA et Telegram uniquement)."
         )
         # On continue quand meme : l'utilisateur peut interagir avec l'IA
+
+    if args.headless:
+        if not init_ok:
+            logger.error("Mode headless: connexion MT5 requise (TRADING_MODE=demo).")
+            return
+        try:
+            await run_headless(mt5, args.pack)
+        finally:
+            if mt5.is_connected:
+                await mt5.shutdown()
+                logger.info("MT5 deconnecte.")
+            MT5Client.shutdown_shared_executor()
+            logger.info("Bot arrete proprement.")
+        return
 
     # 3. Initialiser l'IA et le dispatcher
     ai = AIEngine()
@@ -241,7 +308,7 @@ async def main(argv=None) -> None:
     application.add_error_handler(error_handler)
 
     # 7. Initialiser le moteur d'automation
-    auto_engine = AutomationEngine(application, mt5)
+    auto_engine = AutomationEngine(application, mt5, pack_id=args.pack)
     application.bot_data["auto_engine"] = auto_engine
 
     # 8. Demarrer l'application

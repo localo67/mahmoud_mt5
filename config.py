@@ -28,16 +28,18 @@ if TRADING_MODE not in VALID_TRADING_MODES:
     )
 
 
-def validate_config() -> bool:
+def validate_config(*, headless: bool = False) -> bool:
     """
     Verifie que toutes les variables d'environnement requises sont definies.
     Retourne True si valide, False sinon (avec messages d'erreur).
     """
-    required = {
-        "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
-        "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
-        "AUTHORIZED_CHAT_ID": AUTHORIZED_CHAT_ID,
-    }
+    required: dict = {}
+    if not headless:
+        required.update({
+            "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
+            "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
+            "AUTHORIZED_CHAT_ID": AUTHORIZED_CHAT_ID,
+        })
     if TRADING_MODE in {"shadow", "demo", "live"}:
         required.update({
             "MT5_LOGIN": MT5_LOGIN,
@@ -78,6 +80,7 @@ TIMEFRAME_MAP = {
 # Runtime XAUUSD (session New York)
 # =====================================================================
 
+STRATEGY_PACK = os.getenv("STRATEGY_PACK", "session_breakout_xauusd")
 SYMBOL = os.getenv("BOT_SYMBOL", "XAUUSD")
 VOLUME = float(os.getenv("BOT_VOLUME", "0.01"))
 TIMEFRAME = "M5"

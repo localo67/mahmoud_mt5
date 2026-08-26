@@ -40,8 +40,11 @@ async def test_mt5_runtime_modes_initialize_client(mode: str) -> None:
 def test_arm_demo_flag_requires_demo_mode() -> None:
     args = bot.parse_args([])
     assert args.arm_demo is False
-    args = bot.parse_args(["--arm-demo"])
+    assert args.headless is False
+    args = bot.parse_args(["--arm-demo", "--headless", "--pack", "scalp_eurusd_m1"])
     assert args.arm_demo is True
+    assert args.headless is True
+    assert args.pack == "scalp_eurusd_m1"
 
     class FakeClient:
         trading_mode = "off"

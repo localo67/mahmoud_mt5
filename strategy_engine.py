@@ -56,6 +56,7 @@ class StrategyEngine:
         market_data=None,
         controls=None,
         monitor=None,
+        pack=None,
     ):
         self.app = application
         self.mt5 = mt5_client
@@ -72,6 +73,7 @@ class StrategyEngine:
         self.market_data = market_data or ClosedBarMarketData(mt5_client)
         self.controls = controls
         self.monitor = monitor
+        self.pack = pack
         self.chat_id: Optional[int] = None
         self.enabled: bool = True
         self._last_candle_time: int = 0
@@ -83,11 +85,26 @@ class StrategyEngine:
         self._last_heartbeat: float = 0.0
         self._consecutive_errors: int = 0
         self._emergency_stop: bool = False
-        self._session = SessionPolicy(
-            start_hour=NY_START_HOUR,
-            end_hour=NY_END_HOUR,
-            allow_overnight=False,
-        )
+        self._symbol = pack.symbol if pack is not None else SYMBOL
+        self._fast_tf = pack.fast_timeframe if pack is not None else "M5"
+        self._slow_tf = pack.slow_timeframe if pack is not None else "M15"
+        self._min_fast = pack.min_bars_fast if pack is not None else MIN_CLOSED_BARS
+        self._min_slow = pack.min_bars_slow if pack is not None else MIN_CLOSED_BARS
+        self._entries_today = 0
+        self._entries_day = ""
+        if pack is not None:
+            self._session = SessionPolicy(
+                start_hour=pack.session_start_hour,
+                end_hour=pack.session_end_hour,
+                allow_overnight=pack.allow_overnight,
+                tz=pack.session_tz,
+            )
+        else:
+            self._session = SessionPolicy(
+                start_hour=NY_START_HOUR,
+                end_hour=NY_END_HOUR,
+                allow_overnight=False,
+            )
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -99,6 +116,8 @@ class StrategyEngine:
             "last_outcome": self._last_cycle.outcome if self._last_cycle else None,
             "last_blockers": list(self._last_cycle.blockers) if self._last_cycle else [],
             "mode": getattr(self.mt5, "trading_mode", TRADING_MODE),
+            "pack": getattr(self.pack, "id", None),
+            "symbol": self._symbol,
         }
 
     def _record_cycle(self, result: CycleResult) -> CycleResult:
@@ -113,22 +132,33 @@ class StrategyEngine:
             )
         return result
 
+    def _roll_entry_day(self, now: datetime) -> None:
+        stamp = now.astimezone(timezone.utc).date().isoformat()
+        if stamp != self._entries_day:
+            self._entries_day = stamp
+            self._entries_today = 0
+
+    def _note_entry(self) -> None:
+        self._entries_today += 1
+
     async def evaluate_closed_candle(self) -> CycleResult:
         blockers: list[str] = []
         details: dict = {}
         candle_time: Optional[int] = None
         now = self._now()
-        symbol = SYMBOL
+        symbol = self._symbol
         quote: Optional[Quote] = None
         spec = None
-        bars_m5 = []
-        bars_m15 = []
+        bars_fast = []
+        bars_slow = []
+
+        self._roll_entry_day(now)
 
         if self.controls is not None and not self.controls.state.entries_allowed:
             blockers.append(Blocker.ENTRIES_HALTED.value)
 
         try:
-            resolved = await self.mt5.resolve_symbol(SYMBOL)
+            resolved = await self.mt5.resolve_symbol(self._symbol)
             details["symbol"] = {
                 "requested": resolved.get("requested"),
                 "resolved": resolved.get("resolved"),
@@ -163,6 +193,8 @@ class StrategyEngine:
                     ):
                         blockers.append(Blocker.SYMBOL_SPEC_CHANGED.value)
                     self._symbol_fingerprint = fingerprint
+                if self.risk_engine is not None and spec is not None:
+                    self.risk_engine.spec = spec
                 details["tick"] = {
                     "bid": quote.bid,
                     "ask": quote.ask,
@@ -176,13 +208,24 @@ class StrategyEngine:
                 details["tick_error"] = str(exc)
 
             try:
-                bars_m5 = list(await self.market_data.closed_bars(symbol, "M5", CANDLE_COUNT))
-                bars_m15 = list(await self.market_data.closed_bars(symbol, "M15", CANDLE_COUNT))
-                details["rates"] = {"m5_closed": len(bars_m5), "m15_closed": len(bars_m15)}
-                if len(bars_m5) < MIN_CLOSED_BARS or len(bars_m15) < MIN_CLOSED_BARS:
+                bars_fast = list(
+                    await self.market_data.closed_bars(symbol, self._fast_tf, CANDLE_COUNT)
+                )
+                bars_slow = list(
+                    await self.market_data.closed_bars(symbol, self._slow_tf, CANDLE_COUNT)
+                )
+                details["rates"] = {
+                    "fast_closed": len(bars_fast),
+                    "slow_closed": len(bars_slow),
+                    "fast_tf": self._fast_tf,
+                    "slow_tf": self._slow_tf,
+                    "m5_closed": len(bars_fast) if self._fast_tf == "M5" else len(bars_slow),
+                    "m15_closed": len(bars_slow) if self._slow_tf == "M15" else 0,
+                }
+                if len(bars_fast) < self._min_fast or len(bars_slow) < self._min_slow:
                     blockers.append(Blocker.INSUFFICIENT_CLOSED_BARS.value)
-                elif bars_m5:
-                    candle_time = bars_m5[-1].time
+                elif bars_fast:
+                    candle_time = bars_fast[-1].time
             except Exception as exc:
                 blockers.append(Blocker.INSUFFICIENT_CLOSED_BARS.value)
                 details["rates_error"] = str(exc)
@@ -204,8 +247,19 @@ class StrategyEngine:
                 blockers.append(Blocker.RISK_BLOCK.value)
                 details["risk"] = reason
 
-        if quote is not None and quote.spread / PIP_VALUE > MAX_SPREAD_POINTS:
-            blockers.append(Blocker.SPREAD_BLOCK.value)
+        if quote is not None:
+            if self.pack is not None:
+                if quote.spread > self.pack.max_spread:
+                    blockers.append(Blocker.SPREAD_BLOCK.value)
+            elif quote.spread / PIP_VALUE > MAX_SPREAD_POINTS:
+                blockers.append(Blocker.SPREAD_BLOCK.value)
+
+        if (
+            self.pack is not None
+            and self._entries_today >= self.pack.max_trades_per_day
+        ):
+            blockers.append(Blocker.RISK_BLOCK.value)
+            details["risk"] = "MAX_TRADES_PER_DAY"
 
         if not await self._margin_sufficient():
             blockers.append(Blocker.MARGIN_BLOCK.value)
@@ -247,7 +301,7 @@ class StrategyEngine:
         if set(blockers) & hard or quote is None or spec is None:
             return self._record_cycle(CycleResult(candle_time, blockers, "BLOCKED", details))
 
-        intent = self.decision.evaluate(bars_m5, bars_m15, quote, spec)
+        intent = self.decision.evaluate(bars_fast, bars_slow, quote, spec)
         if not isinstance(intent, SignalIntent):
             blockers.append(Blocker.NO_SIGNAL.value)
             return self._record_cycle(CycleResult(candle_time, blockers, "WAIT", details))
@@ -315,10 +369,12 @@ class StrategyEngine:
                 return self._record_cycle(CycleResult(candle_time, blockers, "BLOCKED", details))
             if trading_mode != "demo" or simulated:
                 blockers.append(Blocker.SHADOW_CANDIDATE.value)
+                self._note_entry()
                 return self._record_cycle(
                     CycleResult(candle_time, blockers, "SHADOW_CANDIDATE", details)
                 )
             blockers.append(Blocker.EXECUTED.value)
+            self._note_entry()
             return self._record_cycle(CycleResult(candle_time, blockers, "EXECUTED", details))
 
         check = await self.mt5.check_order(
@@ -357,7 +413,13 @@ class StrategyEngine:
             return False
 
     async def run(self) -> None:
-        logger.info("StrategyEngine: noyau deterministe session_breakout")
+        logger.info(
+            "StrategyEngine: pack=%s symbol=%s tf=%s/%s",
+            getattr(self.pack, "id", None) or "default",
+            self._symbol,
+            self._fast_tf,
+            self._slow_tf,
+        )
         report_task = asyncio.create_task(self._daily_report_scheduler())
         try:
             while True:
@@ -370,9 +432,9 @@ class StrategyEngine:
                     if not await self._heartbeat():
                         continue
                     await self._session_exit_if_needed()
-                    peek_symbol = self._resolved_symbol or SYMBOL
+                    peek_symbol = self._resolved_symbol or self._symbol
                     try:
-                        peek = await self.mt5.get_closed_rates(peek_symbol, "M5", 2)
+                        peek = await self.mt5.get_closed_rates(peek_symbol, self._fast_tf, 2)
                     except Exception:
                         peek = None
                     if peek:
@@ -428,7 +490,7 @@ class StrategyEngine:
         if self._session.is_open(self._now()):
             return
         try:
-            positions = await self.mt5.get_positions(symbol=self._resolved_symbol or SYMBOL)
+            positions = await self.mt5.get_positions(symbol=self._resolved_symbol or self._symbol)
         except Exception:
             return
         for position in positions:
@@ -445,7 +507,7 @@ class StrategyEngine:
                 await asyncio.sleep(120)
 
     async def _send_daily_report(self) -> None:
-        if not self.chat_id:
+        if not self.chat_id or self.app is None:
             return
         try:
             info = await self.mt5.get_account_info()

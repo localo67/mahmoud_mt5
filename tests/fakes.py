@@ -178,7 +178,13 @@ class FakeMT5:
         )
 
     def copy_rates_from_pos(self, symbol: str, timeframe: int, start_pos: int, count: int):
-        available = self.m5_count if timeframe == self.TIMEFRAME_M5 else self.m15_count
+        available = self.m5_count
+        if timeframe == self.TIMEFRAME_M1:
+            available = getattr(self, "m1_count", self.m5_count)
+        elif timeframe == self.TIMEFRAME_M5:
+            available = self.m5_count
+        else:
+            available = self.m15_count
         if start_pos > 0:
             available = max(0, available - start_pos)
         return make_bars(min(count, available))
