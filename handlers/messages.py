@@ -163,24 +163,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.edit_message_text(f"Erreur : {str(e)}")
 
     # --- Automation ON/OFF ---
-    elif data == "auto_on":
-        if auto_engine is None:
-            await query.edit_message_text("Moteur d'automation non initialise.")
-            return
-        await auto_engine.set_enabled(True)
+    elif data in {"auto_on", "auto_off"}:
+        status = "activee" if auto_engine and getattr(auto_engine, "enabled", False) else "desactivee"
         await query.edit_message_text(
-            "Automation activee !\n"
-            "Vous recevrez des alertes Telegram a chaque signal de trading."
-        )
-
-    elif data == "auto_off":
-        if auto_engine is None:
-            await query.edit_message_text("Moteur d'automation non initialise.")
-            return
-        await auto_engine.set_enabled(False)
-        await query.edit_message_text(
-            "Automation desactivee.\n"
-            "Les strategies sont en pause."
+            f"Automation: {status}. Telegram est en lecture seule et ne peut pas "
+            "activer, desarmer ni armer le trading."
         )
 
     # --- Aide ---

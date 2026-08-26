@@ -14,4 +14,13 @@ Toute modification de code, donnees, regle ou parametre remet les preuves a
 zero. Telegram ne passe aucun ordre. Le volume broker est le lot minimal, une
 position, XAUUSD uniquement.
 
+La chaine est obligatoire : `shadow().go` puis `paper().go` puis `demo().go`.
+Un artefact de preuve (`artifact_id`) dont le hash differe du code/config/data
+courants remet tous les compteurs a NO-GO.
+
+En shadow, le ledger recoit les memes evenements canoniques qu'en demo
+(`intent`, `check`, `fill_*`, `reconcile`) mais `order_send` reste interdit.
+Paper n'est pas un `TRADING_MODE` : c'est un etage de preuve calcule depuis le
+ledger simule.
+
 La demo valide le cablage. Elle ne reproduit pas la liquidite du reel.

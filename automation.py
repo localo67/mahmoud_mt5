@@ -1,86 +1,135 @@
-"""
-Moteur d'automation : assemble le bot autonome IA-first.
-"""
+"""Moteur d'automation : assemble le noyau deterministe XAUUSD."""
+
+from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
 from telegram.ext import Application
 
-from risk_manager import RiskManager
+from config import (
+    AUTHORIZED_CHAT_ID,
+    MAGIC_NUMBER,
+    MAX_CONSECUTIVE_LOSSES,
+    MAX_DAILY_LOSS,
+    RISK_PER_TRADE_PCT,
+    STATE_FILE,
+    TRADING_MODE,
+)
+from core.data import ClosedBarMarketData
+from core.execution import ExecutionGateway
+from core.ledger import Ledger
+from core.mt5_execution import MT5DemoAdapter
+from core.risk import RiskEngine
+from core.simulation import ShadowAdapter
+from core.types import RiskLimits, SymbolSpec
 from news_filter import NewsFilter
-from news_collector import NewsCollector
-from fmp_collector import FMPCollector
-from ai_trader import AITrader
+from ops.control import OperationalControl
+from ops.monitor import Monitor
+from strategies.session_breakout import SessionBreakout
 from strategy_engine import StrategyEngine
-from strategies.breakout import BreakoutRetestStrategy
-from strategies.ema_rsi import EmaRsiStrategy
-from strategies.engulfing import EngulfingStrategy
-from config import AUTHORIZED_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SPEC = SymbolSpec(
+    name="XAUUSD",
+    digits=2,
+    point=0.01,
+    trade_tick_size=0.01,
+    trade_tick_value=1.0,
+    trade_tick_value_profit=1.0,
+    trade_tick_value_loss=1.0,
+    trade_contract_size=100.0,
+    trade_calc_mode=0,
+    currency_profit="USD",
+    currency_margin="USD",
+    volume_min=0.01,
+    volume_max=5.0,
+    volume_step=0.01,
+    volume_limit=10.0,
+    trade_stops_level=10,
+    trade_freeze_level=0,
+    filling_mode=1,
+)
+
 
 class AutomationEngine:
-    """Wrapper qui assemble et lance le bot autonome XAUUSD."""
+    """Assemble ClosedBarMarketData, SessionBreakout, RiskEngine, gateway et ledger."""
 
-    def __init__(self, application: Application, mt5_client):
+    def __init__(
+        self,
+        application: Application,
+        mt5_client,
+        ledger_path: Path | None = None,
+        state_path: Path | None = None,
+        control_path: Path | None = None,
+    ):
         self.app = application
         self.mt5 = mt5_client
         self.enabled: bool = False
-
-        # Composants
-        self.risk_mgr = RiskManager()
-        self.news_filter = NewsFilter(fail_safe=True)  # Mode securise
-        self.news_collector = NewsCollector()
-        self.fmp = FMPCollector()
-        self.ai_trader = AITrader()
-
-        # Strategies (guidelines pour l'IA)
-        strategies = [
-            EmaRsiStrategy(),
-            BreakoutRetestStrategy(),
-            EngulfingStrategy(),
-        ]
-
-        # Orchestrateur IA-first
+        self.news_filter = NewsFilter(fail_safe=True)
+        self.ledger = Ledger(Path(ledger_path or "data/ledger.sqlite"))
+        self.controls = OperationalControl(Path(control_path or "data/control.json"))
+        self.monitor = Monitor(self.controls)
+        self.market_data = ClosedBarMarketData(mt5_client)
+        self.decision = SessionBreakout()
+        self.risk_engine = RiskEngine(
+            limits=RiskLimits(
+                risk_pct=RISK_PER_TRADE_PCT,
+                max_daily_loss=MAX_DAILY_LOSS,
+                max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+            ),
+            spec=DEFAULT_SPEC,
+            now=lambda: datetime.now(timezone.utc),
+            state_path=Path(state_path or STATE_FILE),
+        )
+        mode = getattr(mt5_client, "trading_mode", TRADING_MODE)
+        if mode == "shadow":
+            adapter = ShadowAdapter(mt5_client, magic=MAGIC_NUMBER)
+        else:
+            adapter = MT5DemoAdapter(mt5_client, DEFAULT_SPEC)
+        self.execution = ExecutionGateway(
+            mt5=mt5_client,
+            ledger=self.ledger,
+            spec=DEFAULT_SPEC,
+            magic=MAGIC_NUMBER,
+            adapter=adapter,
+            controls=self.controls,
+        )
         self.engine = StrategyEngine(
             application=application,
             mt5_client=mt5_client,
-            risk_manager=self.risk_mgr,
             news_filter=self.news_filter,
-            news_collector=self.news_collector,
-            fmp_collector=self.fmp,
-            ai_trader=self.ai_trader,
-            strategies=strategies,
+            decision=self.decision,
+            risk_engine=self.risk_engine,
+            execution=self.execution,
+            ledger=self.ledger,
+            market_data=self.market_data,
+            controls=self.controls,
+            monitor=self.monitor,
         )
         self.engine.enabled = False
-
         self.engine.chat_id = AUTHORIZED_CHAT_ID
 
     async def run(self) -> None:
-        logger.info("AutomationEngine: bot IA autonome XAUUSD lance")
+        logger.info("AutomationEngine: noyau deterministe XAUUSD")
         await self.engine.run()
 
     async def set_enabled(self, enabled: bool) -> None:
         self.enabled = enabled
         if self.engine:
             self.engine.enabled = enabled
-        logger.info(f"AutomationEngine: {'ON' if enabled else 'OFF'}")
+        logger.info("AutomationEngine: %s", "ON" if enabled else "OFF")
 
     def get_risk_status(self) -> str:
-        return self.risk_mgr.get_status()
+        return self.risk_engine.get_status()
 
     def get_blocker_report(self) -> dict:
-        getter = getattr(self.engine, "get_blocker_report", None)
-        if getter is None:
-            return {
-                "evaluated_candles": 0,
-                "distribution": {},
-                "last_outcome": None,
-                "last_blockers": [],
-                "mode": getattr(self.mt5, "trading_mode", "off"),
-            }
-        return getter()
+        return self.engine.get_blocker_report()
 
     def reset_risk(self) -> str:
-        self.risk_mgr.reset()
-        return self.risk_mgr.get_status()
+        return (
+            "Reset refuse: kill switch non resettable a chaud. "
+            "Telegram est en lecture seule."
+        )

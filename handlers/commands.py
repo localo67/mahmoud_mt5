@@ -27,10 +27,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             InlineKeyboardButton(" Analyse XAUUSD", callback_data="analyse_XAUUSD"),
         ],
         [
-            InlineKeyboardButton(" Automation ON ", callback_data="auto_on"),
-            InlineKeyboardButton(" Automation OFF ", callback_data="auto_off"),
-        ],
-        [
             InlineKeyboardButton(" Aide ", callback_data="aide"),
         ],
     ]
@@ -38,11 +34,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         " Bonjour ! Je suis votre **assistant de trading IA** connecte a MetaTrader 5.\n\n"
         "Je peux :\n"
-        " Executer des ordres en langage naturel\n"
-        " Consulter votre compte et vos positions\n"
-        " Analyser les marches (MA20, MA50, tendance)\n"
-        " Automatiser des strategies (MA crossover + RSI)\n\n"
-        " Utilisez les boutons ci-dessous ou envoyez-moi un message en francais !",
+        " Consulter votre compte et vos positions (lecture seule)\n"
+        " Analyser les marches\n"
+        " Afficher l'etat du bot et des bloqueurs\n\n"
+        " Telegram ne peut pas passer d'ordre ni armer le trading.",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode=ParseMode.MARKDOWN,
     )
@@ -200,39 +195,18 @@ async def analyse_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ------------------------------------------------------------------
 
 async def auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Active ou desactive l'automation des strategies."""
+    """Lecture seule: l'automation ne peut plus etre armee depuis Telegram."""
     auto_engine = context.bot_data.get("auto_engine")
 
     if auto_engine is None:
         await update.message.reply_text(" Moteur d'automation non initialise.")
         return
 
-    if not context.args:
-        status = "activee " if auto_engine.enabled else "desactivee "
-        await update.message.reply_text(
-            f" Automation : {status}\n"
-            f"Usage : /auto on ou /auto off"
-        )
-        return
-
-    cmd = context.args[0].lower()
-    if cmd == "on":
-        await auto_engine.set_enabled(True)
-        await update.message.reply_text(
-            " Automation activee ! \n"
-            "Les strategies MA Crossover et RSI tournent en arriere-plan.\n"
-            "Vous recevrez une alerte Telegram a chaque signal."
-        )
-    elif cmd == "off":
-        await auto_engine.set_enabled(False)
-        await update.message.reply_text(
-            " Automation desactivee . \n"
-            "Les strategies sont en pause."
-        )
-    else:
-        await update.message.reply_text(
-            " Usage : /auto on ou /auto off"
-        )
+    status = "activee" if getattr(auto_engine, "enabled", False) else "desactivee"
+    await update.message.reply_text(
+        f"Automation: {status}. Telegram est en lecture seule: "
+        "/auto ne peut plus activer, desarmer ni armer le trading."
+    )
 
 
 # ------------------------------------------------------------------
@@ -272,7 +246,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ------------------------------------------------------------------
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reinitialise le risk manager (pertes, compteur, blocage)."""
+    """Lecture seule: refuse de lever le kill switch ou de resetter le risque."""
     auto_engine = context.bot_data.get("auto_engine")
 
     if auto_engine is None:
@@ -281,5 +255,5 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     status = auto_engine.reset_risk()
     await update.message.reply_text(
-        f"Risk manager reinitialise !\n\n{status}"
+        f"Reset refuse. Telegram est en lecture seule.\n\n{status}"
     )

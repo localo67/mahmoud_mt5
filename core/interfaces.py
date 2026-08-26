@@ -51,3 +51,26 @@ class RiskEngine(Protocol):
 class ExecutionGateway(Protocol):
     async def submit(self, order: OrderIntent) -> ExecutionResult:
         ...
+
+
+class ExecutionAdapter(Protocol):
+    backend: str
+    simulated: bool
+
+    async def check(self, order: OrderIntent) -> dict:
+        ...
+
+    async def send(self, order: OrderIntent) -> dict:
+        ...
+
+    async def orders(self, symbol: str) -> list[dict]:
+        ...
+
+    async def history_orders(self, symbol: str) -> list[dict]:
+        ...
+
+    async def history_deals(self, symbol: str) -> list[dict]:
+        ...
+
+    async def positions(self, symbol: Optional[str] = None) -> list[dict]:
+        ...

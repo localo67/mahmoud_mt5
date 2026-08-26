@@ -36,3 +36,15 @@ async def test_ai_timeout_or_invalid_is_veto() -> None:
     veto = AIVeto(provider=hang, timeout_seconds=0.001)
     result = await veto.review(signal_side="sell", headline="nfp")
     assert result.action == "VETO"
+
+
+def test_runtime_does_not_import_directional_ai() -> None:
+    import inspect
+
+    import automation
+    import strategy_engine
+
+    assert "AIVeto" not in inspect.getsource(automation)
+    assert "AITrader" not in inspect.getsource(automation)
+    assert "ai.decide" not in inspect.getsource(strategy_engine)
+    assert "open_order(" not in inspect.getsource(strategy_engine)

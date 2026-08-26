@@ -79,7 +79,11 @@ class FakeMT5:
         self.deals: list = []
         self.timeout_send: bool = False
         self.fail_before_send: bool = False
+        self.drop_position_after_send: bool = False
+        self.truncate_comment: int | None = None
         self.partial_volume: float | None = None
+        self.orders: list = []
+        self.history_orders: list = []
         self._next_ticket: int = 987
         self.initialized = True
 
@@ -117,6 +121,7 @@ class FakeMT5:
             margin_level=0.0,
             trade_mode=self.account_trade_mode,
             trade_allowed=self.trade_allowed,
+            margin_mode=getattr(self, "margin_mode", 2),
         )
 
     def symbols_get(self):
@@ -207,6 +212,9 @@ class FakeMT5:
             if self.partial_volume is not None
             else request.get("volume", 0.0)
         )
+        comment = request.get("comment", "")
+        if self.truncate_comment is not None:
+            comment = comment[: self.truncate_comment]
         position = SimpleNamespace(
             ticket=ticket,
             symbol=request.get("symbol"),
@@ -219,12 +227,23 @@ class FakeMT5:
             profit=0.0,
             swap=0.0,
             commission=0.0,
-            comment=request.get("comment", ""),
+            comment=comment,
             time=self.tick_time,
             identifier=ticket,
             magic=request.get("magic", 0),
         )
-        self.positions.append(position)
+        if not self.drop_position_after_send:
+            self.positions.append(position)
+        self.history_orders.append(
+            SimpleNamespace(
+                ticket=ticket,
+                symbol=request.get("symbol"),
+                magic=request.get("magic", 0),
+                comment=comment,
+                volume=request.get("volume", 0.0),
+                volume_current=filled,
+            )
+        )
         self.deals.append(
             SimpleNamespace(
                 ticket=ticket + 1000,
@@ -238,7 +257,7 @@ class FakeMT5:
                 swap=0.0,
                 entry=0,
                 magic=request.get("magic", 0),
-                comment=request.get("comment", ""),
+                comment=comment,
             )
         )
         if self.timeout_send:
@@ -257,7 +276,25 @@ class FakeMT5:
         )
 
     def history_deals_get(self, *args, **kwargs):
-        return list(self.deals)
+        symbol = kwargs.get("symbol") or kwargs.get("group")
+        items = list(self.deals)
+        if symbol:
+            items = [item for item in items if getattr(item, "symbol", None) == symbol]
+        return items
+
+    def history_orders_get(self, *args, **kwargs):
+        symbol = kwargs.get("symbol") or kwargs.get("group")
+        items = list(self.history_orders)
+        if symbol:
+            items = [item for item in items if getattr(item, "symbol", None) == symbol]
+        return items
 
     def orders_get(self, *args, **kwargs):
-        return []
+        symbol = kwargs.get("symbol")
+        ticket = kwargs.get("ticket")
+        items = list(self.orders)
+        if symbol:
+            items = [item for item in items if getattr(item, "symbol", None) == symbol]
+        if ticket is not None:
+            items = [item for item in items if getattr(item, "ticket", None) == ticket]
+        return tuple(items)

@@ -115,6 +115,8 @@ class OrderIntent:
     tp: float
     filling_mode: int
     comment: str = ""
+    client_order_id: str = ""
+    send_attempt_id: str = ""
 
 
 @dataclass(frozen=True)

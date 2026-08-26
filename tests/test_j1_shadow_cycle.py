@@ -5,118 +5,9 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cycle_result import Blocker, CycleResult
-from mt5_client import MT5Client
-from strategy_engine import StrategyEngine
 from fakes import FakeMT5
-
-
-class SilentNews:
-    async def is_news_time(self):
-        return False
-
-    async def get_headlines(self, n):
-        return []
-
-    async def analyze_sentiment(self, headlines):
-        return headlines
-
-    def format_for_ai(self, headlines):
-        return ""
-
-
-class SilentFmp:
-    async def get_forex_news(self, n):
-        return []
-
-    async def get_gold_price(self):
-        return None
-
-    async def get_treasury_rates(self):
-        return None
-
-    def format_for_ai(self, *args):
-        return ""
-
-
-class SilentRisk:
-    def check_trade_allowed(self):
-        return True, "OK"
-
-    def get_context_for_ai(self):
-        return "ok"
-
-    def calculate_position_size(self, equity, atr):
-        return 0.01
-
-    def record_trade_result(self, profit):
-        return None
-
-    def get_status(self):
-        return "ACTIF"
-
-
-class WaitingAI:
-    async def decide(self, **kwargs):
-        return {
-            "action": "WAIT",
-            "confidence": 0,
-            "sl_price": None,
-            "tp_price": None,
-            "reasoning": "no setup",
-        }
-
-
-class BuyAI:
-    async def decide(self, **kwargs):
-        return {
-            "action": "BUY",
-            "confidence": 80,
-            "sl_price": 2490.0,
-            "tp_price": 2520.0,
-            "reasoning": "breakout",
-        }
-
-
-class LowConfidenceAI:
-    async def decide(self, **kwargs):
-        return {
-            "action": "BUY",
-            "confidence": 10,
-            "sl_price": 2490.0,
-            "tp_price": 2520.0,
-            "reasoning": "weak",
-        }
-
-
-class MissingStopsAI:
-    async def decide(self, **kwargs):
-        return {
-            "action": "BUY",
-            "confidence": 90,
-            "sl_price": None,
-            "tp_price": None,
-            "reasoning": "missing stops",
-        }
-
-
-def _engine(client, ai=None, news_on=False, risk=None, now=None):
-    news = SilentNews()
-    if news_on:
-        news.is_news_time = AsyncMock(return_value=True)
-    engine = StrategyEngine(
-        application=SimpleNamespace(bot=SimpleNamespace(send_message=AsyncMock())),
-        mt5_client=client,
-        risk_manager=risk or SilentRisk(),
-        news_filter=news,
-        news_collector=news,
-        fmp_collector=SilentFmp(),
-        ai_trader=ai or WaitingAI(),
-        strategies=[],
-    )
-    engine.enabled = True
-    if now is not None:
-        engine._now = lambda: now
-    return engine
+from helpers_runtime import AlwaysBuy, NeverSignal, SilentNews, make_engine
+from mt5_client import MT5Client
 
 
 @pytest.mark.asyncio
@@ -124,7 +15,7 @@ async def test_evaluated_candle_always_returns_structured_result() -> None:
     api = FakeMT5()
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-    engine = _engine(client, now=now)
+    engine = make_engine(client, now=now)
 
     result = await engine.evaluate_closed_candle()
 
@@ -140,7 +31,9 @@ async def test_collects_multiple_blockers_together() -> None:
     api = FakeMT5(m5_count=10, m15_count=10, tick_time=1_600_000_000)
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-    engine = _engine(client, news_on=True, now=now)
+    news = SilentNews()
+    news.is_news_time = AsyncMock(return_value=True)
+    engine = make_engine(client, now=now, news_filter=news)
 
     result = await engine.evaluate_closed_candle()
 
@@ -155,40 +48,28 @@ async def test_shadow_candidate_calls_order_check_never_order_send() -> None:
     api = FakeMT5()
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
-    engine = _engine(client, ai=BuyAI(), now=now)
+    engine = make_engine(client, decision=AlwaysBuy(), now=now)
 
     result = await engine.evaluate_closed_candle()
 
-    assert Blocker.SHADOW_CANDIDATE.value in result.blockers or result.outcome == "SHADOW_CANDIDATE"
     assert result.outcome == "SHADOW_CANDIDATE"
+    assert Blocker.SHADOW_CANDIDATE.value in result.blockers
     assert api.check_requests
     assert api.order_requests == []
 
 
 @pytest.mark.asyncio
-async def test_ai_wait_is_logged_as_blocker() -> None:
+async def test_no_signal_is_logged_as_wait() -> None:
     api = FakeMT5()
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
-    engine = _engine(client, ai=WaitingAI(), now=now)
+    engine = make_engine(client, decision=NeverSignal(), now=now)
 
     result = await engine.evaluate_closed_candle()
 
-    assert Blocker.AI_WAIT.value in result.blockers
+    assert Blocker.NO_SIGNAL.value in result.blockers
+    assert result.outcome == "WAIT"
     assert api.order_requests == []
-
-
-@pytest.mark.asyncio
-async def test_low_confidence_and_missing_stops() -> None:
-    api = FakeMT5()
-    client = MT5Client(mt5_api=api, trading_mode="shadow")
-    now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
-
-    low = await _engine(client, ai=LowConfidenceAI(), now=now).evaluate_closed_candle()
-    missing = await _engine(client, ai=MissingStopsAI(), now=now).evaluate_closed_candle()
-
-    assert Blocker.LOW_CONFIDENCE.value in low.blockers
-    assert Blocker.ORDER_CHECK_REJECTED.value in missing.blockers or "sl" in str(missing.details).lower()
 
 
 @pytest.mark.asyncio
@@ -214,7 +95,7 @@ async def test_position_existing_blocks_without_send() -> None:
     ]
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
-    engine = _engine(client, ai=BuyAI(), now=now)
+    engine = make_engine(client, decision=AlwaysBuy(), now=now)
 
     result = await engine.evaluate_closed_candle()
 
@@ -227,7 +108,7 @@ async def test_blocker_distribution_counts_every_evaluated_candle() -> None:
     api = FakeMT5()
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-    engine = _engine(client, now=now)
+    engine = make_engine(client, now=now)
 
     await engine.evaluate_closed_candle()
     await engine.evaluate_closed_candle()
@@ -243,8 +124,58 @@ async def test_unresolved_symbol_is_explicit() -> None:
     api = FakeMT5(symbols=["EURUSD"])
     client = MT5Client(mt5_api=api, trading_mode="shadow")
     now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
-    engine = _engine(client, now=now)
+    engine = make_engine(client, now=now)
 
     result = await engine.evaluate_closed_candle()
 
     assert Blocker.SYMBOL_UNRESOLVED.value in result.blockers
+
+
+@pytest.mark.asyncio
+async def test_shadow_and_demo_share_canonical_events(tmp_path) -> None:
+    from config import MAGIC_NUMBER
+    from core.events import normalize_events
+    from core.execution import ExecutionGateway
+    from core.ledger import Ledger
+    from core.mt5_execution import MT5DemoAdapter
+    from core.simulation import ShadowAdapter
+    from helpers_runtime import GOLD, demo_client
+
+    now = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+    shadow_api = FakeMT5()
+    demo_api = FakeMT5()
+    shadow_ledger = Ledger(tmp_path / "shadow.sqlite")
+    demo_ledger = Ledger(tmp_path / "demo.sqlite")
+    shadow_client = MT5Client(mt5_api=shadow_api, trading_mode="shadow")
+    demo_client_ = demo_client(demo_api, armed=True)
+    shadow_exec = ExecutionGateway(
+        shadow_client,
+        shadow_ledger,
+        GOLD,
+        MAGIC_NUMBER,
+        adapter=ShadowAdapter(shadow_client, magic=MAGIC_NUMBER),
+    )
+    demo_exec = ExecutionGateway(
+        demo_client_,
+        demo_ledger,
+        GOLD,
+        MAGIC_NUMBER,
+        adapter=MT5DemoAdapter(demo_client_, GOLD),
+    )
+    shadow_engine = make_engine(
+        shadow_client, decision=AlwaysBuy(), execution=shadow_exec, ledger=shadow_ledger, now=now
+    )
+    demo_engine = make_engine(
+        demo_client_, decision=AlwaysBuy(), execution=demo_exec, ledger=demo_ledger, now=now
+    )
+
+    shadow_result = await shadow_engine.evaluate_closed_candle()
+    demo_result = await demo_engine.evaluate_closed_candle()
+
+    assert shadow_result.outcome == "SHADOW_CANDIDATE"
+    assert demo_result.outcome == "EXECUTED"
+    assert shadow_api.order_requests == []
+    assert demo_api.order_requests
+    assert normalize_events(shadow_ledger.events("dec-test")) == normalize_events(
+        demo_ledger.events("dec-test")
+    )

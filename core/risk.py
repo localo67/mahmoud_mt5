@@ -105,6 +105,14 @@ class RiskEngine:
             account.currency,
         )
 
+    def get_status(self) -> str:
+        if self.kill_switch:
+            return f"KILL_SWITCH {self.kill_reason}".strip()
+        return (
+            f"ACTIF daily={self.daily_pnl:.2f} "
+            f"weekly={self.weekly_pnl:.2f} consecutive={self.consecutive_losses}"
+        )
+
     def expected_loss(self, volume: float, intent: SignalIntent) -> float:
         return abs(loss_at_stop(volume, self.spec, intent.entry, intent.sl, intent.side))
 

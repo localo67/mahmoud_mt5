@@ -15,9 +15,27 @@ trois conditions suivantes sont reunies :
 3. l'instance `MT5Client` a ete explicitement armee en memoire avec
    `arm_trading()`.
 
+Le runtime passe par un service unique `ExecutionGateway` :
+
+- `INTENT_RECORDED → CHECKED → SUBMITTED → ACCEPTED / PARTIALLY_FILLED / FILLED / REJECTED / CANCELED / EXPIRED` ;
+- un timeout n'est **pas** un etat terminal : `outcome_class=AMBIGUOUS` interdit tout renvoi automatique ;
+- `SEND_ATTEMPT_STARTED` est persiste avant `order_send` ; si l'ecriture echoue, aucun envoi n'a lieu ;
+- la reconcilation lit tickets persistes, ordres actifs, historique des ordres, deals uniques, puis positions.
+
+Deux adapters emettent le meme vocabulaire d'evenements :
+
+- `ShadowAdapter` : `order_check` reel, fill BBO simule, jamais `order_send` ;
+- `MT5DemoAdapter` : `order_check` puis `order_send` sur compte demo arme.
+
+Le filling IOC / FOK / RETURN est choisi d'apres le bitmask du symbole. Voir
+[filling.md](filling.md). `TRADING_MODE=paper` n'existe pas : paper est une etape
+de preuve, pas un mode runtime.
+
+Telegram est strictement lecture seule : `/auto` et `/reset` n'arment pas, ne
+desarment pas et ne levent pas le kill switch.
+
 L'armement n'est ni lu depuis l'environnement ni persiste. Une nouvelle instance
-est toujours desarmee. `TRADING_MODE=live` est reconnu mais refuse : le trading
-live n'est pas implemente au jalon J0.
+est toujours desarmee. `TRADING_MODE=live` est reconnu mais refuse.
 
 La derniere verification du mode, de l'armement et du type de compte est
 executee atomiquement avec `order_send`. Tous les appels MT5 de toutes les

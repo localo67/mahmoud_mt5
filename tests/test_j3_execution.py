@@ -192,3 +192,75 @@ async def test_wrong_stop_side_never_sends(tmp_path: Path) -> None:
     result = await gateway.submit(_order(sl=2510.0, tp=2480.0))
     assert result.status == "REJECTED"
     assert api.order_requests == []
+
+
+@pytest.mark.asyncio
+async def test_timeout_recovers_from_deals_without_position(tmp_path: Path) -> None:
+    api = FakeMT5()
+    api.timeout_send = True
+    api.drop_position_after_send = True
+    gateway = _gateway(tmp_path, api)
+    result = await gateway.submit(_order())
+    assert result.status in {"FILLED", "PARTIAL", "RECONCILED"}
+    assert result.ambiguous is False
+    assert len(api.order_requests) == 1
+    assert len(api.deals) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_timeout_does_not_resend(tmp_path: Path) -> None:
+    api = FakeMT5()
+    api.fail_before_send = True
+    gateway = _gateway(tmp_path, api)
+    first = await gateway.submit(_order())
+    second = await gateway.submit(_order())
+    assert first.ambiguous is True
+    assert second.ambiguous is True
+    assert api.order_requests == []
+
+
+@pytest.mark.asyncio
+async def test_ioc_partial_records_canceled_remainder(tmp_path: Path) -> None:
+    api = FakeMT5()
+    api.partial_volume = 0.01
+    gateway = _gateway(tmp_path, api)
+    result = await gateway.submit(_order(volume=0.02))
+    assert result.volume == 0.01
+    kinds = [item["kind"] for item in gateway.ledger.events("dec-1")]
+    assert "fill_partial" in kinds
+    assert "canceled" in kinds
+
+
+@pytest.mark.asyncio
+async def test_truncated_comment_still_recovers_via_mapping(tmp_path: Path) -> None:
+    api = FakeMT5()
+    api.timeout_send = True
+    api.truncate_comment = 4
+    gateway = _gateway(tmp_path, api)
+    result = await gateway.submit(_order())
+    assert result.status in {"FILLED", "PARTIAL", "RECONCILED"}
+    assert result.ambiguous is False
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_before_send_never_sends(tmp_path: Path) -> None:
+    api = FakeMT5()
+    ledger = Ledger(tmp_path / "ledger.sqlite")
+    original = ledger.append
+
+    def boom(decision_id, kind, payload, **kwargs):
+        if kind == "send_attempt_started":
+            raise RuntimeError("disk full")
+        return original(decision_id, kind, payload, **kwargs)
+
+    ledger.append = boom  # type: ignore[method-assign]
+    gateway = ExecutionGateway(
+        mt5=_client(api),
+        ledger=ledger,
+        spec=GOLD,
+        magic=MAGIC_NUMBER,
+        now=lambda: datetime(2026, 8, 25, 15, tzinfo=timezone.utc),
+    )
+    result = await gateway.submit(_order())
+    assert result.status == "REJECTED"
+    assert api.order_requests == []

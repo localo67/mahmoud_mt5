@@ -351,6 +351,7 @@ class MT5Client:
             "leverage": info.leverage,
             "margin_level": info.margin_level if hasattr(info, "margin_level") else None,
             "trade_mode": info.trade_mode if hasattr(info, "trade_mode") else None,
+            "margin_mode": getattr(info, "margin_mode", None),
         }
 
     # ------------------------------------------------------------------
@@ -408,6 +409,91 @@ class MT5Client:
             if deal.entry == api.DEAL_ENTRY_OUT:
                 return deal.profit
         return None
+
+    async def get_orders(self, symbol: Optional[str] = None, ticket: Optional[int] = None) -> list[dict]:
+        api = self._require_api()
+        kwargs: dict[str, Any] = {}
+        if symbol:
+            kwargs["symbol"] = symbol
+        if ticket is not None:
+            kwargs["ticket"] = ticket
+        orders = await self._run_blocking(api.orders_get, **kwargs)
+        if not orders:
+            return []
+        result = []
+        for item in orders:
+            result.append(
+                {
+                    "ticket": getattr(item, "ticket", None),
+                    "symbol": getattr(item, "symbol", None),
+                    "volume": getattr(item, "volume_current", getattr(item, "volume", 0.0)),
+                    "magic": getattr(item, "magic", 0),
+                    "comment": getattr(item, "comment", ""),
+                    "type": getattr(item, "type", None),
+                }
+            )
+        return result
+
+    async def get_history_orders(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        symbol: Optional[str] = None,
+    ) -> list[dict]:
+        api = self._require_api()
+        kwargs: dict[str, Any] = {}
+        if symbol:
+            kwargs["group"] = symbol
+        items = await self._run_blocking(api.history_orders_get, date_from, date_to, **kwargs)
+        if not items:
+            return []
+        result = []
+        for item in items:
+            result.append(
+                {
+                    "ticket": getattr(item, "ticket", None),
+                    "symbol": getattr(item, "symbol", None),
+                    "volume": getattr(item, "volume_current", getattr(item, "volume", 0.0)),
+                    "magic": getattr(item, "magic", 0),
+                    "comment": getattr(item, "comment", ""),
+                    "order": getattr(item, "ticket", None),
+                }
+            )
+        return result
+
+    async def get_history_deals(
+        self,
+        date_from: datetime,
+        date_to: datetime,
+        symbol: Optional[str] = None,
+        position: Optional[int] = None,
+    ) -> list[dict]:
+        api = self._require_api()
+        kwargs: dict[str, Any] = {}
+        if symbol:
+            kwargs["group"] = symbol
+        if position is not None:
+            kwargs["position"] = position
+        items = await self._run_blocking(api.history_deals_get, date_from, date_to, **kwargs)
+        if not items:
+            return []
+        result = []
+        for item in items:
+            result.append(
+                {
+                    "ticket": getattr(item, "ticket", None),
+                    "order": getattr(item, "order", None),
+                    "position_id": getattr(item, "position_id", None),
+                    "symbol": getattr(item, "symbol", None),
+                    "volume": getattr(item, "volume", 0.0),
+                    "price": getattr(item, "price", 0.0),
+                    "profit": getattr(item, "profit", 0.0),
+                    "magic": getattr(item, "magic", 0),
+                    "comment": getattr(item, "comment", ""),
+                    "entry": getattr(item, "entry", 0),
+                }
+            )
+        return result
 
     # ------------------------------------------------------------------
     # Prix et donnees de marche
