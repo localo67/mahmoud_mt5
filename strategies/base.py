@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 
+from core.indicators import atr as core_atr
+from core.indicators import ema as core_ema
+from core.indicators import rsi as core_rsi
+
 
 # Helpers compatibilite Windows/Linux: les rates MT5 sont des tuples sur Windows
 def ro(r): return r.open if hasattr(r, 'open') else r[1]
@@ -57,36 +61,20 @@ class BaseStrategy(ABC):
     # ------------------------------------------------------------------
 
     def _ema(self, closes: np.ndarray, period: int) -> float:
-        """Calcule l'EMA (Exponential Moving Average)."""
-        if len(closes) < period:
-            return float(np.mean(closes))
-        alpha = 2.0 / (period + 1.0)
-        result = closes[0]
-        for price in closes[1:]:
-            result = alpha * price + (1 - alpha) * result
-        return float(result)
+        """Calcule l'EMA (implementation unique du noyau)."""
+        return core_ema(closes, period)
 
     def _sma(self, closes: np.ndarray, period: int) -> float:
         """Calcule la SMA (Simple Moving Average)."""
         return float(np.mean(closes[-period:]))
 
     def _rsi(self, closes: np.ndarray, period: int = 14) -> float:
-        """Calcule le RSI (Relative Strength Index) — methode SMA."""
-        if len(closes) < period + 1:
-            return 50.0
+        """Calcule le RSI (implementation unique du noyau)."""
+        return core_rsi(closes, period)
 
-        deltas = np.diff(closes[-(period + 1):])
-        gains = np.maximum(deltas, 0)
-        losses = np.abs(np.minimum(deltas, 0))
-
-        avg_gain = float(np.mean(gains))
-        avg_loss = float(np.mean(losses))
-
-        if avg_loss == 0:
-            return 100.0
-
-        rs = avg_gain / avg_loss
-        return 100.0 - (100.0 / (1.0 + rs))
+    def _atr(self, rates: list, period: int = 14) -> float:
+        ohlc = [(ro(r), rh(r), rl(r), rc(r)) for r in rates]
+        return core_atr(ohlc, period)
 
     def _recent_high(self, highs: np.ndarray, lookback: int = 20, exclude_last: int = 1) -> float:
         """Plus haut recent (exclut les dernieres bougies)."""

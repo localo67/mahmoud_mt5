@@ -33,6 +33,10 @@ from cycle_result import (
     MIN_CLOSED_BARS,
     STALE_TICK_SECONDS,
 )
+from core.indicators import atr as core_atr
+from core.indicators import ema as core_ema
+from core.indicators import rsi as core_rsi
+from core.session import SessionPolicy
 from strategies.base import Signal
 from risk_manager import RiskManager
 from news_filter import NewsFilter
@@ -94,6 +98,11 @@ class StrategyEngine:
         self._last_cycle: Optional[CycleResult] = None
         self._resolved_symbol: Optional[str] = None
         self._symbol_fingerprint: Optional[tuple] = None
+        self._session = SessionPolicy(
+            start_hour=NY_START_HOUR,
+            end_hour=NY_END_HOUR,
+            allow_overnight=False,
+        )
 
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -761,47 +770,23 @@ class StrategyEngine:
 
     @staticmethod
     def _ema(closes: np.ndarray, period: int) -> float:
-        if len(closes) < period:
-            return float(np.mean(closes))
-        alpha = 2.0 / (period + 1.0)
-        seed = float(np.mean(closes[:period]))
-        result = seed
-        for price in closes[period:]:
-            result = alpha * price + (1 - alpha) * result
-        return float(result)
+        return core_ema(closes, period)
 
     @staticmethod
     def _rsi(closes: np.ndarray, period: int = 14) -> float:
-        if len(closes) < period + 1:
-            return 50.0
-        deltas = np.diff(closes[-(period + 1):])
-        gains = np.maximum(deltas, 0)
-        losses = np.abs(np.minimum(deltas, 0))
-        avg_gain = float(np.mean(gains))
-        avg_loss = float(np.mean(losses))
-        if avg_loss == 0:
-            return 100.0
-        return 100.0 - (100.0 / (1.0 + avg_gain / avg_loss))
+        return core_rsi(closes, period)
 
     @staticmethod
     def _atr(rates: list, period: int = 14) -> float:
-        if len(rates) < period + 1:
-            return 0.0
-        tr_values = []
-        for i in range(1, len(rates)):
-            r, r_prev = rates[i], rates[i - 1]
-            h, l, c_prev = _rh(r), _rl(r), _rc(r_prev)
-            tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
-            tr_values.append(tr)
-        return float(np.mean(tr_values[-period:]))
+        ohlc = [(_ro(r), _rh(r), _rl(r), _rc(r)) for r in rates]
+        return core_atr(ohlc, period)
 
     # ------------------------------------------------------------------
     # Filtres
     # ------------------------------------------------------------------
 
     def _is_ny_session(self) -> bool:
-        now = self._now()
-        return NY_START_HOUR <= now.hour < NY_END_HOUR
+        return self._session.is_open(self._now())
 
     @staticmethod
     def _get_candle_time(rate) -> int:

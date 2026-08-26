@@ -98,9 +98,9 @@ TIMEFRAME = "M5"
 TREND_TIMEFRAME = "M15"
 CANDLE_COUNT = 200  # Nombre de bougies a charger
 
-# NY Session (UTC) — 9h-17h NY = 13h-21h UTC
-NY_START_HOUR = int(os.getenv("NY_START_HOUR", "13"))
-NY_END_HOUR = int(os.getenv("NY_END_HOUR", "21"))
+# NY Session in America/New_York local time (DST-aware)
+NY_START_HOUR = int(os.getenv("NY_START_HOUR", "9"))
+NY_END_HOUR = int(os.getenv("NY_END_HOUR", "17"))
 
 # Risk Manager (no trade count limit, only P&L caps)
 MAX_CONSECUTIVE_LOSSES = int(os.getenv("MAX_CONSECUTIVE_LOSSES", "2"))
