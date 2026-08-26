@@ -69,6 +69,18 @@ class AutomationEngine:
     def get_risk_status(self) -> str:
         return self.risk_mgr.get_status()
 
+    def get_blocker_report(self) -> dict:
+        getter = getattr(self.engine, "get_blocker_report", None)
+        if getter is None:
+            return {
+                "evaluated_candles": 0,
+                "distribution": {},
+                "last_outcome": None,
+                "last_blockers": [],
+                "mode": getattr(self.mt5, "trading_mode", "off"),
+            }
+        return getter()
+
     def reset_risk(self) -> str:
         self.risk_mgr.reset()
         return self.risk_mgr.get_status()

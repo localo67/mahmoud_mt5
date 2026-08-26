@@ -240,7 +240,7 @@ async def auto_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ------------------------------------------------------------------
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Affiche l'etat du risk manager."""
+    """Affiche l'etat du risk manager et la distribution des bloqueurs."""
     auto_engine = context.bot_data.get("auto_engine")
 
     if auto_engine is None:
@@ -248,7 +248,23 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     status = auto_engine.get_risk_status()
-    await update.message.reply_text(status)
+    report = auto_engine.get_blocker_report()
+    distribution = report.get("distribution") or {}
+    dist_lines = [
+        f"  {code}: {count}"
+        for code, count in sorted(distribution.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    blockers_text = "\n".join(dist_lines) if dist_lines else "  aucun"
+    last_blockers = ", ".join(report.get("last_blockers") or []) or "-"
+    text = (
+        f"{status}\n\n"
+        f"Mode: {report.get('mode', 'unknown')}\n"
+        f"Bougies evaluees: {report.get('evaluated_candles', 0)}\n"
+        f"Dernier resultat: {report.get('last_outcome') or '-'}\n"
+        f"Derniers bloqueurs: {last_blockers}\n"
+        f"Distribution:\n{blockers_text}"
+    )
+    await update.message.reply_text(text)
 
 
 # ------------------------------------------------------------------

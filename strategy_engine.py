@@ -11,6 +11,8 @@ from typing import Optional
 import numpy as np
 from telegram.ext import Application
 
+from collections import Counter
+
 from config import (
     SYMBOL,
     VOLUME,
@@ -23,6 +25,13 @@ from config import (
     TRAILING_DISTANCE_PIPS,
     DAILY_REPORT_HOUR,
     MAX_SPREAD_POINTS,
+    TRADING_MODE,
+)
+from cycle_result import (
+    Blocker,
+    CycleResult,
+    MIN_CLOSED_BARS,
+    STALE_TICK_SECONDS,
 )
 from strategies.base import Signal
 from risk_manager import RiskManager
@@ -80,6 +89,300 @@ class StrategyEngine:
         self._last_heartbeat: float = 0.0
         self._consecutive_errors: int = 0
         self._emergency_stop: bool = False
+        self._evaluated_candles: int = 0
+        self._blocker_counts: Counter[str] = Counter()
+        self._last_cycle: Optional[CycleResult] = None
+        self._resolved_symbol: Optional[str] = None
+        self._symbol_fingerprint: Optional[tuple] = None
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def get_blocker_report(self) -> dict:
+        return {
+            "evaluated_candles": self._evaluated_candles,
+            "distribution": dict(self._blocker_counts),
+            "last_outcome": self._last_cycle.outcome if self._last_cycle else None,
+            "last_blockers": list(self._last_cycle.blockers) if self._last_cycle else [],
+            "mode": getattr(self.mt5, "trading_mode", TRADING_MODE),
+        }
+
+    def _record_cycle(self, result: CycleResult) -> CycleResult:
+        self._evaluated_candles += 1
+        self._blocker_counts.update(result.blockers)
+        self._last_cycle = result
+        return result
+
+    async def evaluate_closed_candle(self) -> CycleResult:
+        """Evalue la derniere bougie cloturee et journalise tous les bloqueurs."""
+        blockers: list[str] = []
+        details: dict = {}
+        candle_time: Optional[int] = None
+        now = self._now()
+        symbol = SYMBOL
+        rates_m5 = None
+        rates_m15 = None
+        price = None
+
+        try:
+            resolved = await self.mt5.resolve_symbol(SYMBOL)
+            details["symbol"] = {
+                "requested": resolved.get("requested"),
+                "resolved": resolved.get("resolved"),
+                "candidates": resolved.get("candidates"),
+                "ambiguous": resolved.get("ambiguous"),
+            }
+            if not resolved.get("resolved"):
+                blockers.append(Blocker.SYMBOL_UNRESOLVED.value)
+            else:
+                symbol = resolved["resolved"]
+                self._resolved_symbol = symbol
+        except Exception as exc:
+            blockers.append(Blocker.MT5_UNAVAILABLE.value)
+            details["mt5_error"] = str(exc)
+            return self._record_cycle(
+                CycleResult(None, blockers, "BLOCKED", details)
+            )
+
+        if Blocker.SYMBOL_UNRESOLVED.value not in blockers:
+            try:
+                specs = await self.mt5.get_symbol_info(symbol)
+                fingerprint = None
+                if specs:
+                    fingerprint = (
+                        specs.get("point"),
+                        specs.get("trade_tick_size"),
+                        specs.get("volume_min"),
+                        specs.get("filling_mode"),
+                    )
+                    if (
+                        self._symbol_fingerprint is not None
+                        and fingerprint != self._symbol_fingerprint
+                    ):
+                        blockers.append(Blocker.SYMBOL_SPEC_CHANGED.value)
+                    self._symbol_fingerprint = fingerprint
+                price = await self.mt5.get_current_price(symbol)
+                details["tick"] = {
+                    "bid": price.get("bid"),
+                    "ask": price.get("ask"),
+                    "spread": price.get("spread"),
+                    "age_seconds": int(now.timestamp()) - int(price.get("time") or 0),
+                }
+                if details["tick"]["age_seconds"] > STALE_TICK_SECONDS:
+                    blockers.append(Blocker.STALE_TICK.value)
+            except Exception as exc:
+                blockers.append(Blocker.STALE_TICK.value)
+                details["tick_error"] = str(exc)
+
+            try:
+                rates_m5 = await self.mt5.get_closed_rates(symbol, "M5", CANDLE_COUNT)
+                rates_m15 = await self.mt5.get_closed_rates(symbol, "M15", CANDLE_COUNT)
+                m5_count = len(rates_m5) if rates_m5 is not None else 0
+                m15_count = len(rates_m15) if rates_m15 is not None else 0
+                details["rates"] = {"m5_closed": m5_count, "m15_closed": m15_count}
+                if m5_count < MIN_CLOSED_BARS or m15_count < MIN_CLOSED_BARS:
+                    blockers.append(Blocker.INSUFFICIENT_CLOSED_BARS.value)
+                elif m5_count:
+                    candle_time = self._get_candle_time(rates_m5[-1])
+            except Exception as exc:
+                blockers.append(Blocker.INSUFFICIENT_CLOSED_BARS.value)
+                details["rates_error"] = str(exc)
+
+        if not self._is_ny_session():
+            blockers.append(Blocker.OUTSIDE_SESSION.value)
+
+        try:
+            if await self.news_filter.is_news_time():
+                blockers.append(Blocker.NEWS_BLOCK.value)
+        except Exception as exc:
+            blockers.append(Blocker.NEWS_BLOCK.value)
+            details["news_error"] = str(exc)
+
+        allowed, reason = self.risk_mgr.check_trade_allowed()
+        if not allowed:
+            blockers.append(Blocker.RISK_BLOCK.value)
+            details["risk"] = reason
+
+        if price is not None and not self._check_spread(price):
+            blockers.append(Blocker.SPREAD_BLOCK.value)
+
+        if not await self._margin_sufficient():
+            blockers.append(Blocker.MARGIN_BLOCK.value)
+
+        try:
+            positions = await self.mt5.get_positions(symbol=symbol)
+            if positions:
+                blockers.append(Blocker.POSITION_EXISTS.value)
+                details["open_positions"] = len(positions)
+        except Exception as exc:
+            details["position_error"] = str(exc)
+
+        hard = {
+            Blocker.MT5_UNAVAILABLE.value,
+            Blocker.SYMBOL_UNRESOLVED.value,
+            Blocker.STALE_TICK.value,
+            Blocker.INSUFFICIENT_CLOSED_BARS.value,
+            Blocker.OUTSIDE_SESSION.value,
+            Blocker.NEWS_BLOCK.value,
+            Blocker.RISK_BLOCK.value,
+            Blocker.SPREAD_BLOCK.value,
+            Blocker.MARGIN_BLOCK.value,
+            Blocker.POSITION_EXISTS.value,
+            Blocker.SYMBOL_SPEC_CHANGED.value,
+        }
+        if set(blockers) & hard or price is None or rates_m5 is None or rates_m15 is None:
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "BLOCKED", details)
+            )
+
+        strategy_signals = []
+        for strategy in self.strategies:
+            try:
+                signal: Optional[Signal] = await strategy.evaluate(
+                    rates_m5, rates_m15, price
+                )
+                strategy_signals.append({
+                    "name": getattr(strategy, "name", strategy.__class__.__name__),
+                    "direction": signal.direction.upper() if signal else "NONE",
+                    "sl_price": signal.sl_price if signal else None,
+                    "tp_price": signal.tp_price if signal else None,
+                })
+            except Exception as exc:
+                logger.error("StrategyEngine: %s error — %s", strategy, exc)
+                strategy_signals.append({
+                    "name": getattr(strategy, "name", "unknown"),
+                    "direction": "NONE",
+                    "sl_price": None,
+                    "tp_price": None,
+                })
+
+        closes_m5 = np.array([_rc(r) for r in rates_m5])
+        closes_m15 = np.array([_rc(r) for r in rates_m15])
+        dxy_price = None
+        try:
+            dxy_tick = await self.mt5.get_current_price("USDX")
+            if dxy_tick:
+                dxy_price = dxy_tick.get("bid")
+        except Exception:
+            pass
+        tick_vol = sum(_rt(r) for r in rates_m5[-5:]) if rates_m5 else 0
+        market_data = self._build_market_data(
+            rates_m5, closes_m5, closes_m15, price, dxy_price, tick_vol
+        )
+        headlines = await self.news_collector.get_headlines(5)
+        headlines = await self.news_collector.analyze_sentiment(headlines)
+        news_text = self.news_collector.format_for_ai(headlines)
+        fmp_news = await self.fmp.get_forex_news(5)
+        gold_quote = await self.fmp.get_gold_price()
+        treasury = await self.fmp.get_treasury_rates()
+        fmp_text = self.fmp.format_for_ai(fmp_news, gold_quote, treasury)
+        combined_news = f"{news_text}\n\n[FOREX NEWS + MACRO FMP]\n{fmp_text}"
+        decision = await self.ai.decide(
+            market_data=market_data,
+            strategy_signals=strategy_signals,
+            news_formatted=combined_news,
+            risk_context=self.risk_mgr.get_context_for_ai(),
+            trade_history=self._format_trade_history(),
+        )
+        details["decision"] = {
+            "action": decision.get("action"),
+            "confidence": decision.get("confidence"),
+            "has_sl": decision.get("sl_price") is not None,
+            "has_tp": decision.get("tp_price") is not None,
+        }
+
+        if decision.get("action") == "WAIT":
+            blockers.append(Blocker.AI_WAIT.value)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "WAIT", details)
+            )
+        if decision.get("confidence", 0) < AI_MIN_CONFIDENCE:
+            blockers.append(Blocker.LOW_CONFIDENCE.value)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "WAIT", details)
+            )
+        if decision.get("sl_price") is None or decision.get("tp_price") is None:
+            blockers.append(Blocker.ORDER_CHECK_REJECTED.value)
+            details["sl"] = decision.get("sl_price")
+            details["tp"] = decision.get("tp_price")
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "WAIT", details)
+            )
+
+        trading_mode = getattr(self.mt5, "trading_mode", TRADING_MODE)
+        account_info = await self.mt5.get_account_info()
+        atr_val = float(str(market_data.get("atr", "0")).replace(",", "."))
+        trade_volume = self.risk_mgr.calculate_position_size(
+            account_info["equity"], atr_val
+        )
+        check = await self.mt5.check_order(
+            symbol,
+            decision["action"].lower(),
+            trade_volume,
+            sl=decision.get("sl_price"),
+            tp=decision.get("tp_price"),
+        )
+        details["order_check"] = {
+            "ok": check.get("ok"),
+            "retcode": check.get("retcode"),
+            "called": check.get("called"),
+        }
+        if not check.get("ok"):
+            blockers.append(Blocker.ORDER_CHECK_REJECTED.value)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "BLOCKED", details)
+            )
+
+        if trading_mode != "demo":
+            blockers.append(Blocker.SHADOW_CANDIDATE.value)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "SHADOW_CANDIDATE", details)
+            )
+
+        if not getattr(self.mt5, "is_trading_armed", False):
+            blockers.append(Blocker.NOT_ARMED.value)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "BLOCKED", details)
+            )
+
+        result = await self._execute_with_retry(decision, trade_volume)
+        if result.get("success"):
+            blockers.append(Blocker.EXECUTED.value)
+            self._traded_this_candle = True
+            ticket = result.get("ticket")
+            if ticket:
+                self._known_tickets.add(ticket)
+            self._trade_history.append({
+                "time": now.strftime("%H:%M"),
+                "date": now.strftime("%Y-%m-%d"),
+                "action": decision["action"],
+                "sl": f"{decision.get('sl_price', 0) or 0:.2f}",
+                "tp": f"{decision.get('tp_price', 0) or 0:.2f}",
+                "confidence": decision.get("confidence", 0),
+                "reasoning": decision.get("reasoning", "")[:100],
+                "ticket": ticket,
+            })
+            if len(self._trade_history) > 5:
+                self._trade_history = self._trade_history[-5:]
+            self.risk_mgr.record_trade_result(0.0)
+            await self._send_alert(decision, result)
+            return self._record_cycle(
+                CycleResult(candle_time, blockers, "EXECUTED", details)
+            )
+
+        blockers.append(Blocker.SEND_AMBIGUOUS.value)
+        details["send"] = {"error": result.get("error"), "retcode": result.get("retcode")}
+        return self._record_cycle(
+            CycleResult(candle_time, blockers, "BLOCKED", details)
+        )
+
+    async def _margin_sufficient(self) -> bool:
+        try:
+            info = await self.mt5.get_account_info()
+            free_margin = info.get("free_margin", 0)
+            return free_margin >= 5.0
+        except Exception:
+            return False
 
     async def run(self) -> None:
         """Boucle principale."""
@@ -108,159 +411,23 @@ class StrategyEngine:
                     # Maintenance: P&L reel + trailing
                     await self._maintenance_cycle()
 
-                    # Donnees
-                    rates_m5 = await self.mt5.get_rates(SYMBOL, "M5", CANDLE_COUNT)
-                    rates_m15 = await self.mt5.get_rates(SYMBOL, "M15", CANDLE_COUNT)
-                    price = await self.mt5.get_current_price(SYMBOL)
-
-                    if rates_m5 is None or rates_m15 is None or len(rates_m5) < 50:
-                        continue
-
-                    # Nouvelle bougie ? L'IA ne s'appelle QUE sur nouvelle bougie M5 (economise API)
-                    current_candle_time = self._get_candle_time(rates_m5[-1])
-                    is_new_candle = current_candle_time != self._last_candle_time
-                    if is_new_candle:
-                        self._last_candle_time = current_candle_time
-                        self._traded_this_candle = False
-
-                    # Skip si pas nouvelle bougie — maintenance uniquement, pas d'appel IA
-                    if not is_new_candle or self._traded_this_candle:
-                        continue
-
-                    logger.info(
-                        f"StrategyEngine: nouvelle bougie M5 — "
-                        f"bid={price['bid']:.2f} spread={price['spread']:.3f}"
-                    )
-
-                    # Filtres
-                    if not self._is_ny_session():
-                        continue
-                    if await self.news_filter.is_news_time():
-                        continue
-                    allowed, reason = self.risk_mgr.check_trade_allowed()
-                    if not allowed:
-                        continue
-
-                    # Spread filter
-                    if not self._check_spread(price):
-                        continue
-
-                    # Verifier marge disponible
-                    if not await self._check_margin():
-                        continue
-
-                    # Verifier si deja une position XAUUSD
-                    xau_positions = await self.mt5.get_positions(symbol=SYMBOL)
-                    if xau_positions:
-                        continue
-
-                    # Evaluer les strategies (guidelines)
-                    strategy_signals = []
-                    for strategy in self.strategies:
-                        try:
-                            signal: Optional[Signal] = await strategy.evaluate(
-                                rates_m5, rates_m15, price
-                            )
-                            s = {
-                                "name": strategy.name,
-                                "direction": signal.direction.upper() if signal else "NONE",
-                                "sl_price": signal.sl_price if signal else None,
-                                "tp_price": signal.tp_price if signal else None,
-                            }
-                        except Exception as e:
-                            logger.error(f"StrategyEngine: {strategy.name} error — {e}")
-                            s = {"name": strategy.name, "direction": "NONE", "sl_price": None, "tp_price": None}
-                        strategy_signals.append(s)
-
-                    # Contexte pour l'IA
-                    closes_m5 = np.array([_rc(r) for r in rates_m5])
-                    closes_m15 = np.array([_rc(r) for r in rates_m15])
-
-                    dxy_price = None
+                    peek_symbol = self._resolved_symbol or SYMBOL
                     try:
-                        dxy_tick = await self.mt5.get_current_price("USDX")
-                        if dxy_tick:
-                            dxy_price = dxy_tick.get("bid")
+                        peek = await self.mt5.get_closed_rates(peek_symbol, "M5", 2)
                     except Exception:
-                        pass
-
-                    tick_vol = sum(_rt(r) for r in rates_m5[-5:]) if rates_m5 is not None and len(rates_m5) > 0 else 0
-                    market_data = self._build_market_data(rates_m5, closes_m5, closes_m15, price, dxy_price, tick_vol)
-
-                    headlines = await self.news_collector.get_headlines(5)
-                    headlines = await self.news_collector.analyze_sentiment(headlines)
-                    news_text = self.news_collector.format_for_ai(headlines)
-
-                    # FMP: forex news, prix or, taux
-                    fmp_news = await self.fmp.get_forex_news(5)
-                    gold_quote = await self.fmp.get_gold_price()
-                    treasury = await self.fmp.get_treasury_rates()
-                    fmp_text = self.fmp.format_for_ai(fmp_news, gold_quote, treasury)
-
-                    # Fusionner les sources
-                    combined_news = f"{news_text}\n\n[FOREX NEWS + MACRO FMP]\n{fmp_text}"
-
-                    risk_context = self.risk_mgr.get_context_for_ai()
-                    history_text = self._format_trade_history()
-
-                    # Decision IA
-                    decision = await self.ai.decide(
-                        market_data=market_data,
-                        strategy_signals=strategy_signals,
-                        news_formatted=combined_news,
-                        risk_context=risk_context,
-                        trade_history=history_text,
+                        peek = None
+                    if peek:
+                        peek_time = self._get_candle_time(peek[-1])
+                        if peek_time == self._last_candle_time:
+                            continue
+                    cycle = await self.evaluate_closed_candle()
+                    if cycle.candle_time is not None:
+                        self._last_candle_time = cycle.candle_time
+                    logger.info(
+                        "StrategyEngine: cycle outcome=%s blockers=%s",
+                        cycle.outcome,
+                        ",".join(cycle.blockers) or "-",
                     )
-
-                    if decision["action"] == "WAIT":
-                        continue
-                    if decision["confidence"] < AI_MIN_CONFIDENCE:
-                        continue
-
-                    allowed, reason = self.risk_mgr.check_trade_allowed()
-                    if not allowed:
-                        continue
-
-                    # Verifier encore une fois avant d'executer
-                    xau_positions = await self.mt5.get_positions(symbol=SYMBOL)
-                    if xau_positions:
-                        continue
-                    if not await self._check_margin():
-                        continue
-
-                    # Volume dynamique selon ATR et equity
-                    account_info = await self.mt5.get_account_info()
-                    atr_val = float(str(market_data.get("atr", "0")).replace(",", "."))
-                    trade_volume = self.risk_mgr.calculate_position_size(
-                        account_info["equity"], atr_val
-                    )
-
-                    # Executer avec retry
-                    result = await self._execute_with_retry(decision, trade_volume)
-
-                    if result["success"]:
-                        self._traded_this_candle = True
-                        ticket = result.get("ticket")
-                        if ticket:
-                            self._known_tickets.add(ticket)
-
-                        self._trade_history.append({
-                            "time": datetime.now(timezone.utc).strftime("%H:%M"),
-                            "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                            "action": decision["action"],
-                            "sl": f"{decision.get('sl_price', 0) or 0:.2f}",
-                            "tp": f"{decision.get('tp_price', 0) or 0:.2f}",
-                            "confidence": decision.get("confidence", 0),
-                            "reasoning": decision.get("reasoning", "")[:100],
-                            "ticket": ticket,
-                        })
-                        if len(self._trade_history) > 5:
-                            self._trade_history = self._trade_history[-5:]
-
-                        self.risk_mgr.record_trade_result(0.0)
-                        await self._send_alert(decision, result)
-
-                    # Reinitialiser le compteur d'erreurs sur cycle reussi
                     self._consecutive_errors = 0
 
                 except asyncio.CancelledError:
@@ -342,7 +509,7 @@ class StrategyEngine:
             return True
         except Exception as e:
             logger.error(f"Margin check error: {e}")
-            return True  # Fail-open: on tente quand meme
+            return False
 
     # ------------------------------------------------------------------
     # Retry sur echec d'ordre
@@ -633,7 +800,7 @@ class StrategyEngine:
     # ------------------------------------------------------------------
 
     def _is_ny_session(self) -> bool:
-        now = datetime.now(timezone.utc)
+        now = self._now()
         return NY_START_HOUR <= now.hour < NY_END_HOUR
 
     @staticmethod

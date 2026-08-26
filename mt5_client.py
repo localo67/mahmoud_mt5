@@ -28,6 +28,11 @@ from config import (
     TRADING_MODE,
     VALID_TRADING_MODES,
 )
+from cycle_result import (
+    Blocker,
+    MIN_CLOSED_BARS,
+    STALE_TICK_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -420,6 +425,7 @@ class MT5Client:
             "ask": tick.ask,
             "spread": (tick.ask - tick.bid) if tick.bid > 0 else 0,
             "time": tick.time,
+            "time_msc": getattr(tick, "time_msc", tick.time * 1000),
         }
 
     async def get_symbol_info(self, symbol: str) -> Optional[dict]:
@@ -431,14 +437,27 @@ class MT5Client:
 
         return {
             "symbol": info.name,
+            "visible": getattr(info, "visible", True),
+            "select": getattr(info, "select", True),
             "digits": info.digits,
             "spread": info.spread,
             "trade_mode": info.trade_mode,
             "volume_min": info.volume_min,
             "volume_max": info.volume_max,
             "volume_step": info.volume_step,
+            "volume_limit": getattr(info, "volume_limit", None),
             "point": info.point,
             "trade_tick_size": info.trade_tick_size,
+            "trade_tick_value": getattr(info, "trade_tick_value", None),
+            "trade_tick_value_profit": getattr(info, "trade_tick_value_profit", None),
+            "trade_tick_value_loss": getattr(info, "trade_tick_value_loss", None),
+            "trade_contract_size": getattr(info, "trade_contract_size", None),
+            "trade_calc_mode": getattr(info, "trade_calc_mode", None),
+            "currency_profit": getattr(info, "currency_profit", None),
+            "currency_margin": getattr(info, "currency_margin", None),
+            "trade_stops_level": getattr(info, "trade_stops_level", None),
+            "trade_freeze_level": getattr(info, "trade_freeze_level", None),
+            "filling_mode": getattr(info, "filling_mode", None),
             "bid": info.bid,
             "ask": info.ask,
         }
@@ -460,6 +479,209 @@ class MT5Client:
             api.copy_rates_from_pos, symbol, tf, 0, count
         )
         return rates
+
+    async def get_closed_rates(
+        self,
+        symbol: str,
+        timeframe: str = "M5",
+        count: int = 100,
+    ) -> Optional[list]:
+        """OHLCV des bougies deja cloturees (ignore la bougie en formation)."""
+        api = self._require_api()
+        tf = getattr(api, f"TIMEFRAME_{timeframe}", api.TIMEFRAME_M5)
+        return await self._run_blocking(
+            api.copy_rates_from_pos, symbol, tf, 1, count
+        )
+
+    async def resolve_symbol(self, requested: str) -> dict:
+        """Resout un symbole broker. N'en choisit jamais un si le match est ambigu."""
+        api = self._require_api()
+        requested_upper = requested.upper()
+        listing = await self._run_blocking(api.symbols_get)
+        names = [item.name for item in listing] if listing else []
+        exact = [name for name in names if name.upper() == requested_upper]
+        if len(exact) == 1:
+            return {
+                "requested": requested,
+                "resolved": exact[0],
+                "candidates": exact,
+                "ambiguous": False,
+            }
+        prefixed = [
+            name for name in names if name.upper().startswith(requested_upper)
+        ]
+        if len(prefixed) == 1:
+            return {
+                "requested": requested,
+                "resolved": prefixed[0],
+                "candidates": prefixed,
+                "ambiguous": False,
+            }
+        return {
+            "requested": requested,
+            "resolved": None,
+            "candidates": prefixed or exact,
+            "ambiguous": len(prefixed) > 1,
+        }
+
+    async def check_order(
+        self,
+        symbol: str,
+        order_type: str,
+        volume: float,
+        sl: Optional[float] = None,
+        tp: Optional[float] = None,
+    ) -> dict:
+        """Valide un ordre via order_check, sans jamais appeler order_send."""
+        api = self._require_api()
+        tick = await self.get_current_price(symbol)
+        price = tick["ask"] if order_type == "buy" else tick["bid"]
+        mt5_type = api.ORDER_TYPE_BUY if order_type == "buy" else api.ORDER_TYPE_SELL
+        request = {
+            "action": api.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": mt5_type,
+            "price": price,
+            "deviation": DEVIATION_PIPS,
+            "magic": MAGIC_NUMBER,
+            "comment": "preflight-check",
+            "type_time": api.ORDER_TIME_GTC,
+            "type_filling": api.ORDER_FILLING_IOC,
+        }
+        if sl is not None:
+            request["sl"] = sl
+        if tp is not None:
+            request["tp"] = tp
+
+        result = await self._run_blocking(api.order_check, request)
+        if result is None:
+            last_error = await self._run_blocking(api.last_error)
+            return {
+                "ok": False,
+                "called": True,
+                "retcode": last_error[0] if last_error else -1,
+                "comment": str(last_error),
+            }
+        retcode = result.retcode
+        return {
+            "ok": retcode == api.TRADE_RETCODE_DONE,
+            "called": True,
+            "retcode": retcode,
+            "comment": getattr(result, "comment", ""),
+        }
+
+    async def preflight(self, requested_symbol: str) -> dict:
+        """Rapport machine-lisible, sans secret, avant toute mutation."""
+        blockers: list[str] = []
+        report: dict = {
+            "ok": False,
+            "blockers": blockers,
+            "account": {},
+            "terminal": {},
+            "symbol": {},
+            "specs": {},
+            "rates": {},
+            "tick": {},
+            "order_check": {"called": False, "ok": False},
+        }
+        if self._mt5 is None:
+            blockers.append(Blocker.MT5_UNAVAILABLE.value)
+            return report
+
+        try:
+            api = self._require_api()
+            terminal = await self._run_blocking(api.terminal_info)
+            account = await self._run_blocking(api.account_info)
+        except MT5Error as exc:
+            blockers.append(Blocker.MT5_UNAVAILABLE.value)
+            report["error"] = str(exc)
+            return report
+
+        report["terminal"] = {
+            "connected": bool(getattr(terminal, "connected", False)) if terminal else False,
+            "trade_allowed": bool(getattr(terminal, "trade_allowed", False)) if terminal else False,
+            "name": getattr(terminal, "name", None) if terminal else None,
+        }
+        if terminal is None or not report["terminal"]["trade_allowed"]:
+            blockers.append(Blocker.PREFLIGHT_FAILED.value)
+
+        if account is None:
+            blockers.append(Blocker.PREFLIGHT_FAILED.value)
+            report["account"] = {"trade_mode": "unknown"}
+        else:
+            trade_mode = getattr(account, "trade_mode", None)
+            label = "unknown"
+            if trade_mode == api.ACCOUNT_TRADE_MODE_DEMO:
+                label = "demo"
+            elif trade_mode == getattr(api, "ACCOUNT_TRADE_MODE_REAL", object()):
+                label = "real"
+            report["account"] = {
+                "trade_mode": label,
+                "currency": getattr(account, "currency", None),
+                "leverage": getattr(account, "leverage", None),
+                "margin_free": getattr(account, "margin_free", None),
+            }
+            if label != "demo":
+                blockers.append(Blocker.PREFLIGHT_FAILED.value)
+
+        try:
+            resolved = await self.resolve_symbol(requested_symbol)
+        except MT5Error:
+            blockers.append(Blocker.SYMBOL_UNRESOLVED.value)
+            return report
+
+        report["symbol"] = resolved
+        symbol = resolved.get("resolved")
+        if not symbol:
+            blockers.append(Blocker.SYMBOL_UNRESOLVED.value)
+            report["ok"] = False
+            report["blockers"] = list(dict.fromkeys(blockers))
+            return report
+
+        await self._run_blocking(api.symbol_select, symbol, True)
+        specs = await self.get_symbol_info(symbol)
+        report["specs"] = specs or {}
+        if specs is None:
+            blockers.append(Blocker.SYMBOL_UNRESOLVED.value)
+
+        try:
+            tick = await self.get_current_price(symbol)
+            report["tick"] = {
+                "bid": tick["bid"],
+                "ask": tick["ask"],
+                "spread": tick["spread"],
+                "age_seconds": int(datetime.now().timestamp()) - int(tick.get("time") or 0),
+            }
+            if report["tick"]["age_seconds"] > STALE_TICK_SECONDS:
+                blockers.append(Blocker.STALE_TICK.value)
+        except MT5Error:
+            blockers.append(Blocker.STALE_TICK.value)
+
+        m5 = await self.get_closed_rates(symbol, "M5", 200)
+        m15 = await self.get_closed_rates(symbol, "M15", 200)
+        m5_count = len(m5) if m5 is not None else 0
+        m15_count = len(m15) if m15 is not None else 0
+        report["rates"] = {"m5_closed": m5_count, "m15_closed": m15_count}
+        if m5_count < MIN_CLOSED_BARS or m15_count < MIN_CLOSED_BARS:
+            blockers.append(Blocker.INSUFFICIENT_CLOSED_BARS.value)
+
+        if specs is not None:
+            bid = float(specs.get("bid") or 0)
+            check = await self.check_order(
+                symbol,
+                "buy",
+                float(specs.get("volume_min") or 0.01),
+                sl=bid - 10.0 if bid else None,
+                tp=bid + 20.0 if bid else None,
+            )
+            report["order_check"] = check
+            if not check.get("ok"):
+                blockers.append(Blocker.ORDER_CHECK_REJECTED.value)
+
+        report["blockers"] = list(dict.fromkeys(blockers))
+        report["ok"] = len(report["blockers"]) == 0
+        return report
 
     # ------------------------------------------------------------------
     # Execution d'ordres
