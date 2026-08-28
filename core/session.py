@@ -1,4 +1,4 @@
-"""Session America/New_York avec DST, sans overnight pendant la validation."""
+"""Session de trading : fenetre horaire, ou semaine forex (dimanche 17h NY → vendredi 17h NY)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 NY_TZ = ZoneInfo("America/New_York")
+VALID_KINDS = frozenset({"clock", "fx_week"})
 
 
 class SessionPolicy:
@@ -15,11 +16,15 @@ class SessionPolicy:
         end_hour: int = 17,
         allow_overnight: bool = False,
         tz: ZoneInfo | str = NY_TZ,
+        kind: str = "clock",
     ):
+        if kind not in VALID_KINDS:
+            raise ValueError(f"session kind inconnu: {kind!r}")
         self.start_hour = start_hour
         self.end_hour = end_hour
         self.allow_overnight = allow_overnight
         self.tz = ZoneInfo(tz) if isinstance(tz, str) else tz
+        self.kind = kind
 
     def localize(self, moment: datetime) -> datetime:
         if moment.tzinfo is None:
@@ -28,9 +33,19 @@ class SessionPolicy:
 
     def is_open(self, moment: datetime) -> bool:
         local = self.localize(moment)
-        if local.weekday() >= 5:
+        weekday = local.weekday()
+        hour = local.hour
+        if self.kind == "fx_week":
+            if weekday == 5:
+                return False
+            if weekday == 6:
+                return hour >= self.start_hour
+            if weekday == 4:
+                return hour < self.end_hour
+            return True
+        if weekday >= 5:
             return False
-        return self.start_hour <= local.hour < self.end_hour
+        return self.start_hour <= hour < self.end_hour
 
     def allows_new_entry(self, moment: datetime) -> bool:
         return self.is_open(moment)
@@ -38,6 +53,8 @@ class SessionPolicy:
     def would_be_overnight(self, moment: datetime, hold_until: datetime) -> bool:
         if self.allow_overnight:
             return False
+        if self.kind == "fx_week":
+            return self.is_open(moment) and not self.is_open(hold_until)
         start_local = self.localize(moment)
         end_local = self.localize(hold_until)
         if end_local.date() != start_local.date():

@@ -8,10 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from core.session import VALID_KINDS
 from core.types import SymbolSpec
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKS_ROOT = ROOT / "packs"
+
+
+def _session_kind(raw: dict[str, Any]) -> str:
+    kind = str(raw.get("session_kind") or "clock")
+    if kind not in VALID_KINDS:
+        raise ValueError(f"session_kind inconnu: {kind!r}")
+    return kind
 
 
 @dataclass(frozen=True)
@@ -21,6 +29,7 @@ class PackConfig:
     fast_timeframe: str
     slow_timeframe: str
     session_tz: str
+    session_kind: str
     session_start_hour: int
     session_end_hour: int
     max_spread: float
@@ -89,6 +98,7 @@ def load_pack(pack_id: str) -> PackConfig:
         fast_timeframe=str(raw.get("fast_timeframe") or "M5"),
         slow_timeframe=str(raw.get("slow_timeframe") or "M15"),
         session_tz=str(raw.get("session_tz") or "America/New_York"),
+        session_kind=_session_kind(raw),
         session_start_hour=int(raw.get("session_start_hour") or 9),
         session_end_hour=int(raw.get("session_end_hour") or 17),
         max_spread=float(raw["max_spread"]),

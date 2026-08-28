@@ -15,10 +15,12 @@ Sinon : **aucun trade**. C'est normal.
 
 ## Quand lancer
 
-Seance Londres, jours de semaine, environ 8h-17h heure de Londres
-(en France l'ete : souvent 9h-18h).
+Semaine forex : **dimanche 23h → vendredi 23h** heure de Paris
+(ouverture / cloture standard 17h New York). Samedi : ferme.
 
-Maximum 8 essais par jour, pause de 5 minutes entre deux entrees.
+Le spread reste un filtre : la nuit asiatique, beaucoup de cycles seront
+`SPREAD_BLOCK` sans trade. Maximum 8 essais par jour, pause de 5 minutes
+entre deux entrees.
 
 ## Windows
 

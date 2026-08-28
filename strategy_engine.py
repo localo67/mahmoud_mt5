@@ -98,6 +98,7 @@ class StrategyEngine:
                 end_hour=pack.session_end_hour,
                 allow_overnight=pack.allow_overnight,
                 tz=pack.session_tz,
+                kind=pack.session_kind,
             )
         else:
             self._session = SessionPolicy(

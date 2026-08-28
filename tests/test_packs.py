@@ -26,6 +26,15 @@ def test_load_pack_unknown_raises() -> None:
         raise AssertionError("expected ValueError")
 
 
+def test_runnable_packs_use_fx_week_from_market_open() -> None:
+    for pack_id in ("scalp_eurusd_m1", "scalp_xauusd_m1", "session_breakout_xauusd"):
+        pack = load_pack(pack_id)
+        assert pack.session_kind == "fx_week"
+        assert pack.session_tz == "America/New_York"
+        assert pack.session_start_hour == 17
+        assert pack.session_end_hour == 17
+
+
 def test_session_breakout_pack_builds_same_strategy() -> None:
     pack = load_pack("session_breakout_xauusd")
     strategy = build_strategy(pack)
